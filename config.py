@@ -15,7 +15,7 @@ OWNER_CHAT_ID = int(str(os.environ.get("OWNER_CHAT_ID", "0")).strip("'\""))
 ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
 TZ            = ZoneInfo("America/Los_Angeles")
 DB_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "food.db")
-COOKING_MD    = os.path.expanduser("~/Documents/food/COOKING.md")
+COOKING_MD    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "COOKING.md")
 
 DAILY_LIMITS = {
     "calories":  2000,
