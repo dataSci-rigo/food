@@ -1,3 +1,6 @@
 .env
 
 *.db
+*.json
+__pycache__
+nutrition(1).py
