@@ -107,7 +107,11 @@ def _rating_keyboard(log_ids: list[int]) -> InlineKeyboardMarkup:
 
 
 def _owner_only(chat_id: int) -> bool:
-    return chat_id == config.OWNER_CHAT_ID
+    return chat_id in (config.OWNER_CHAT_ID, config.CHANNEL_ID)
+
+
+async def _send(msg: Message, text: str, **kwargs) -> Message:
+    return await msg.answer(text, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +277,14 @@ Send a photo of a nutrition label and I'll read it.
 async def cmd_start(msg: Message):
     if not _owner_only(msg.chat.id):
         return
-    await msg.answer(_HELP_TEXT, parse_mode="Markdown")
+    await _send(msg, _HELP_TEXT, parse_mode="Markdown")
 
 
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
     if not _owner_only(msg.chat.id):
         return
-    await msg.answer(_HELP_TEXT, parse_mode="Markdown")
+    await _send(msg, _HELP_TEXT, parse_mode="Markdown")
 
 
 @dp.message(Command("today"))
@@ -290,7 +294,7 @@ async def cmd_today(msg: Message):
     date = _today()
     rows = db.get_day_log(date)
     if not rows:
-        await msg.answer("Nothing logged today.")
+        await _send(msg, "Nothing logged today.")
         return
     lines = [f"*{date}*"]
     for r in rows:
@@ -304,7 +308,7 @@ async def cmd_today(msg: Message):
     totals = db.get_day_totals(date)
     lines.append("")
     lines.append(_format_totals(totals))
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+    await _send(msg, "\n".join(lines), parse_mode="Markdown")
 
 
 @dp.message(Command("budget"))
@@ -312,7 +316,7 @@ async def cmd_budget(msg: Message):
     if not _owner_only(msg.chat.id):
         return
     totals = db.get_day_totals(_today())
-    await msg.answer(_format_budget(totals))
+    await _send(msg, _format_budget(totals))
 
 
 @dp.message(Command("history"))
@@ -321,13 +325,13 @@ async def cmd_history(msg: Message):
         return
     rows = db.get_history_totals(7)
     if not rows:
-        await msg.answer("No history yet.")
+        await _send(msg, "No history yet.")
         return
     lines = ["*7-day history*"]
     for r in rows:
         pct = int(r["calories"] / config.DAILY_LIMITS["calories"] * 100)
         lines.append(f"  {r['date']}: {r['calories']:.0f} kcal ({pct}%)")
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+    await _send(msg, "\n".join(lines), parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +342,7 @@ async def cmd_history(msg: Message):
 async def handle_photo(msg: Message):
     if not _owner_only(msg.chat.id):
         return
-    await msg.answer("Reading label...")
+    await _send(msg, "Reading label...")
     try:
         photo = msg.photo[-1]
         file = await bot.get_file(photo.file_id)
@@ -346,11 +350,11 @@ async def handle_photo(msg: Message):
         image_bytes = bio.read()
         data = await ocr.read_label(image_bytes)
     except ValueError as e:
-        await msg.answer(f"Couldn't read a nutrition label: {e}")
+        await _send(msg, f"Couldn't read a nutrition label: {e}")
         return
     except Exception as e:
         log.exception("OCR error")
-        await msg.answer(f"Error reading label: {e}")
+        await _send(msg, f"Error reading label: {e}")
         return
 
     food_name = data.get("food_name") or "Unknown food"
@@ -379,7 +383,7 @@ async def handle_photo(msg: Message):
         "idx": 0,
         "log_ids": [],
     })
-    await msg.answer("\n".join(summary_lines), parse_mode="Markdown")
+    await _send(msg, "\n".join(summary_lines), parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -399,14 +403,14 @@ async def handle_text(msg: Message):
         return
     if state == "awaiting_rating":
         db.clear_state(msg.chat.id)
-        await msg.answer("Rating skipped.")
+        await _send(msg, "Rating skipped.")
 
     # Intent extraction
     try:
         intent_data = await _extract_intent(msg.text)
     except Exception as e:
         log.exception("Intent extraction failed")
-        await msg.answer(f"Sorry, I couldn't understand that: {e}")
+        await _send(msg, f"Sorry, I couldn't understand that: {e}")
         return
 
     intent = intent_data.get("intent", "other")
@@ -415,7 +419,7 @@ async def handle_text(msg: Message):
     if intent_data.get("clarification_needed"):
         q = intent_data.get("clarification_question", "Could you clarify?")
         db.set_state(msg.chat.id, "clarifying", {"original": msg.text, "question": q})
-        await msg.answer(q)
+        await _send(msg, q)
         return
 
     if intent == "query":
@@ -427,12 +431,12 @@ async def handle_text(msg: Message):
     elif intent == "log":
         await _handle_log(msg, foods, msg.text)
     else:
-        await msg.answer("I track food! Tell me what you ate, or ask /today or /budget.")
+        await _send(msg, "I track food! Tell me what you ate, or ask /today or /budget.")
 
 
 async def _handle_check(msg: Message, foods: list[str]):
     if not foods:
-        await msg.answer("What food do you want to check?")
+        await _send(msg, "What food do you want to check?")
         return
     lines = []
     for food_str in foods:
@@ -461,7 +465,7 @@ async def _handle_check(msg: Message, foods: list[str]):
             f"  Sugar:   {result.sugar_g or '—'} g",
             "",
         ]
-    await msg.answer("\n".join(lines), parse_mode="Markdown")
+    await _send(msg, "\n".join(lines), parse_mode="Markdown")
 
 
 async def _handle_log(msg: Message, foods: list[str], user_input: str):
@@ -491,7 +495,7 @@ async def _handle_log(msg: Message, foods: list[str], user_input: str):
             f"{_progress_bar(totals['calories'], lim['calories'])}"
         )
         keyboard = _rating_keyboard(log_ids) if log_ids else None
-        await msg.answer("\n".join(reply_lines), parse_mode=None,
+        await _send(msg, "\n".join(reply_lines), parse_mode=None,
                          reply_markup=keyboard)
 
     # Ask for grams if any per_100g foods remain
@@ -503,8 +507,8 @@ async def _handle_log(msg: Message, foods: list[str], user_input: str):
             "log_ids": log_ids,
             "date": date,
         })
-        await msg.answer(f"How many grams of *{first['food_name']}* did you eat?",
-                         parse_mode="Markdown")
+        await _send(msg, f"How many grams of *{first['food_name']}* did you eat?",
+                    parse_mode="Markdown")
 
 
 async def _handle_grams(msg: Message, pending: dict):
@@ -518,11 +522,11 @@ async def _handle_grams(msg: Message, pending: dict):
         try:
             grams = float(re.search(r"[\d.]+", grams_text).group())
         except (AttributeError, ValueError):
-            await msg.answer("Please send a number (grams eaten, or 0 to skip).")
+            await _send(msg, "Please send a number (grams eaten, or 0 to skip).")
             return
         if grams == 0:
             db.clear_state(msg.chat.id)
-            await msg.answer("Skipped.")
+            await _send(msg, "Skipped.")
             return
         scale = grams / (data.get("serving_g") or 100)
         nutrients = {
@@ -552,14 +556,14 @@ async def _handle_grams(msg: Message, pending: dict):
             f"Today: {totals['calories']:.0f} / {lim['calories']} kcal  "
             f"{_progress_bar(totals['calories'], lim['calories'])}"
         )
-        await msg.answer(reply, reply_markup=_rating_keyboard([log_id]))
+        await _send(msg, reply, reply_markup=_rating_keyboard([log_id]))
         return
 
     # Normal per_100g flow
     try:
         grams = float(re.search(r"[\d.]+", text).group())
     except (AttributeError, ValueError):
-        await msg.answer("Please send a number (grams).")
+        await _send(msg, "Please send a number (grams).")
         return
 
     foods = pending["foods"]
@@ -581,8 +585,8 @@ async def _handle_grams(msg: Message, pending: dict):
             "foods": foods, "idx": idx, "log_ids": log_ids, "date": date
         })
         next_food = foods[idx]
-        await msg.answer(f"{line}\n\nHow many grams of *{next_food['food_name']}* did you eat?",
-                         parse_mode="Markdown")
+        await _send(msg, f"{line}\n\nHow many grams of *{next_food['food_name']}* did you eat?",
+                    parse_mode="Markdown")
     else:
         db.clear_state(msg.chat.id)
         totals = db.get_day_totals(date)
@@ -593,7 +597,7 @@ async def _handle_grams(msg: Message, pending: dict):
             f"{_progress_bar(totals['calories'], lim['calories'])}"
         )
         keyboard = _rating_keyboard(log_ids) if log_ids else None
-        await msg.answer(reply, parse_mode=None, reply_markup=keyboard)
+        await _send(msg, reply, parse_mode=None, reply_markup=keyboard)
 
 
 # ---------------------------------------------------------------------------

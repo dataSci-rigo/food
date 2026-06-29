@@ -225,6 +225,15 @@ async def cmd_help(msg: Message):
     await msg.reply(_HELP_TEXT, parse_mode="Markdown")
 
 
+@router.message(_CHAN, _THR, Command("website"))
+async def cmd_website(msg: Message):
+    ip = config.VM_TAILSCALE_IP
+    if not ip:
+        await msg.reply("VM_TAILSCALE_IP not set in .env")
+        return
+    await msg.reply(f"http://{ip}:9000/food")
+
+
 @router.message(_CHAN, _THR, Command("today"))
 async def cmd_today(msg: Message):
     date = _today()

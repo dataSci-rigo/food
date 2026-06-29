@@ -92,12 +92,12 @@ def _format_exercise(ex: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _HELP_TEXT = """\
-💪 *Workout Tracker*
+💪 <b>Workout Tracker</b>
 
 Just describe what you did:
   "3 sets of 10 push-ups"
   "Ran 5km in 25 minutes"
-  "Bench press: 3×8 @ 185 lbs"
+  "Bench press: 3x8 @ 185 lbs"
   "20 min cycling, 30 min yoga"
 
 /workout_today — today's log
@@ -108,7 +108,16 @@ Just describe what you did:
 @router.message(_CHAN, _THR, Command("help"))
 @router.message(_CHAN, _THR, Command("start"))
 async def cmd_help(msg: Message):
-    await msg.reply(_HELP_TEXT, parse_mode="Markdown")
+    await msg.reply(_HELP_TEXT, parse_mode="HTML")
+
+
+@router.message(_CHAN, _THR, Command("website"))
+async def cmd_website(msg: Message):
+    ip = config.VM_TAILSCALE_IP
+    if not ip:
+        await msg.reply("VM_TAILSCALE_IP not set in .env")
+        return
+    await msg.reply(f"http://{ip}:9000/workout")
 
 
 @router.message(_CHAN, _THR, Command("workout_today"))

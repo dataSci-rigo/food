@@ -96,7 +96,7 @@ def _parse_add_med(text: str) -> tuple[str, float | None, str | None, str]:
 # ---------------------------------------------------------------------------
 
 _HELP_TEXT = """\
-💊 *Meds & Supplements*
+💊 <b>Meds &amp; Supplements</b>
 
 Tap a button below to log a dose, or use commands:
 
@@ -113,7 +113,16 @@ Tap a button below to log a dose, or use commands:
 @router.message(_CHAN, _THR, Command("start"))
 async def cmd_help(msg: Message):
     keyboard = _catalog_keyboard()
-    await msg.reply(_HELP_TEXT, parse_mode="Markdown", reply_markup=keyboard)
+    await msg.reply(_HELP_TEXT, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.message(_CHAN, _THR, Command("website"))
+async def cmd_website(msg: Message):
+    ip = config.VM_TAILSCALE_IP
+    if not ip:
+        await msg.reply("VM_TAILSCALE_IP not set in .env")
+        return
+    await msg.reply(f"http://{ip}:9000/meds")
 
 
 @router.message(_CHAN, _THR, Command("meds"))
