@@ -219,6 +219,7 @@ def lookup(query: str, kind: str = "auto") -> Optional[FoodResult]:
     """
     kind: "auto" | "barcode" | "freeform" | "name"
     Returns a FoodResult or None if nothing matched.
+    Falls back to USDA when API Ninjas key is missing or fails.
     """
     if kind == "auto":
         kind = detect_kind(query)
@@ -226,7 +227,12 @@ def lookup(query: str, kind: str = "auto") -> Optional[FoodResult]:
     if kind == "barcode":
         return openfoodfacts_by_barcode(query)
     if kind == "freeform":
-        return apininjas_nutrition(query)
+        if not API_NINJAS_API_KEY:
+            return usda_search(query)
+        try:
+            return apininjas_nutrition(query)
+        except Exception:
+            return usda_search(query)
     if kind == "name":
         return usda_search(query)
     raise ValueError(f"unknown kind: {kind}")

@@ -83,6 +83,31 @@ def init_db():
                 updated_at   TEXT    NOT NULL
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS recipes (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                name             TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                user_input       TEXT,
+                ingredients_json TEXT,
+                total_json       TEXT,
+                saved_at         TEXT NOT NULL
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS food_catalog (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                name             TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                cal_per_100g     REAL,
+                sat_fat_per_100g REAL,
+                sodium_per_100g  REAL,
+                carbs_per_100g   REAL,
+                sugar_per_100g   REAL,
+                fiber_per_100g   REAL,
+                serving_g        REAL,
+                source           TEXT,
+                saved_at         TEXT NOT NULL
+            )
+        """)
 
 
 def _now_utc() -> str:
@@ -264,6 +289,124 @@ def set_state(chat_id: int, state: str, pending: dict | None = None):
 
 def clear_state(chat_id: int):
     set_state(chat_id, "idle", None)
+
+
+# ---------- Food catalog ----------
+
+# ---------- Recipes ----------
+
+def recipe_save(name: str, user_input: str, ingredients: list[dict], total: dict) -> None:
+    import json as _json
+    now = _now_utc()
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO recipes (name, user_input, ingredients_json, total_json, saved_at)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+                user_input      = excluded.user_input,
+                ingredients_json= excluded.ingredients_json,
+                total_json      = excluded.total_json,
+                saved_at        = excluded.saved_at
+        """, (name, user_input, _json.dumps(ingredients), _json.dumps(total), now))
+
+
+def recipe_list() -> list[dict]:
+    import json as _json
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT id, name, user_input, total_json, saved_at FROM recipes ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["total"] = _json.loads(d.pop("total_json", "{}") or "{}")
+        results.append(d)
+    return results
+
+
+def recipe_get(name: str) -> dict | None:
+    import json as _json
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM recipes WHERE LOWER(name)=?", (name.lower(),)
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["ingredients"] = _json.loads(d.pop("ingredients_json", "[]") or "[]")
+    d["total"]       = _json.loads(d.pop("total_json", "{}") or "{}")
+    return d
+
+
+def recipe_delete(name: str) -> bool:
+    with _conn() as con:
+        cur = con.execute(
+            "DELETE FROM recipes WHERE LOWER(name)=?", (name.lower(),)
+        )
+    return cur.rowcount > 0
+
+
+def catalog_save(name: str, per_100g: dict, serving_g: float | None, source: str) -> None:
+    now = _now_utc()
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO food_catalog
+                (name, cal_per_100g, sat_fat_per_100g, sodium_per_100g,
+                 carbs_per_100g, sugar_per_100g, fiber_per_100g, serving_g, source, saved_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+                cal_per_100g     = excluded.cal_per_100g,
+                sat_fat_per_100g = excluded.sat_fat_per_100g,
+                sodium_per_100g  = excluded.sodium_per_100g,
+                carbs_per_100g   = excluded.carbs_per_100g,
+                sugar_per_100g   = excluded.sugar_per_100g,
+                fiber_per_100g   = excluded.fiber_per_100g,
+                serving_g        = COALESCE(excluded.serving_g, serving_g),
+                source           = excluded.source,
+                saved_at         = excluded.saved_at
+        """, (
+            name,
+            per_100g.get("calories"), per_100g.get("sat_fat_g"),
+            per_100g.get("sodium_mg"), per_100g.get("carbs_g"),
+            per_100g.get("sugar_g"), per_100g.get("fiber_g"),
+            serving_g, source, now,
+        ))
+
+
+def catalog_search(query: str) -> dict | None:
+    """Return best matching catalog entry for query, or None."""
+    q = query.strip().lower()
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM food_catalog ORDER BY LENGTH(name)"
+        ).fetchall()
+    entries = [dict(r) for r in rows]
+    for e in entries:
+        if e["name"].lower() == q:
+            return e
+    for e in entries:
+        if e["name"].lower() in q:
+            return e
+    for e in entries:
+        if q in e["name"].lower():
+            return e
+    return None
+
+
+def catalog_list() -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM food_catalog ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def catalog_delete(name: str) -> bool:
+    with _conn() as con:
+        cur = con.execute(
+            "DELETE FROM food_catalog WHERE LOWER(name)=?", (name.lower(),)
+        )
+    return cur.rowcount > 0
 
 
 if __name__ == "__main__":
