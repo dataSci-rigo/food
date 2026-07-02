@@ -4,3 +4,4 @@
 *.json
 __pycache__
 nutrition(1).py
+tests

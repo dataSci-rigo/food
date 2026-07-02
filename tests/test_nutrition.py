@@ -206,6 +206,38 @@ def test_apininjas_sums_multiple_items(monkeypatch):
     assert result.source == "apininjas"
 
 
+def test_lookup_freeform_apininjas_free_tier_none_calories_falls_back(monkeypatch):
+    """API Ninjas free tier returns calories=None — lookup() must fall back to USDA."""
+    monkeypatch.setattr(nutrition, "API_NINJAS_API_KEY", "fake-free-tier-key")
+    free_tier_result = FoodResult(
+        name="chicken breast", source="apininjas", basis="per_serving",
+        calories=None, sodium_mg=72, serving_g=100,
+    )
+    usda_result = FoodResult(
+        name="Chicken breast", source="usda", basis="per_100g",
+        calories=165, carbs_g=0, saturated_fat_g=1, sodium_mg=74,
+    )
+    call_count = {"n": 0}
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _mock_response([{
+                "name": "chicken breast", "calories": "Only available for premium subscribers.",
+                "serving_size_g": 100, "fat_total_g": 3.5, "fat_saturated_g": 1.0,
+                "protein_g": "Only available for premium subscribers.",
+                "sodium_mg": 74, "carbohydrates_total_g": 0, "fiber_g": 0, "sugar_g": 0,
+            }])
+        return _mock_response({"foods": [_USDA_FOOD]})
+
+    with patch("nutrition.requests.get", side_effect=side_effect):
+        # Force freeform kind so the API Ninjas path is exercised
+        result = lookup("chicken breast", kind="freeform")
+
+    assert result is not None
+    assert result.source == "usda", f"expected usda fallback, got {result.source}"
+    assert result.calories is not None
+
+
 def test_usda_parses_nutrient_values():
     with patch("nutrition.requests.get") as mock_get:
         mock_get.return_value = _mock_response({"foods": [_USDA_FOOD]})

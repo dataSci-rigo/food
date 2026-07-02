@@ -230,7 +230,11 @@ def lookup(query: str, kind: str = "auto") -> Optional[FoodResult]:
         if not API_NINJAS_API_KEY:
             return usda_search(query)
         try:
-            return apininjas_nutrition(query)
+            result = apininjas_nutrition(query)
+            if result is None or result.calories is None:
+                # Free-tier key: calories gated behind premium — fall back to USDA
+                return usda_search(query)
+            return result
         except Exception:
             return usda_search(query)
     if kind == "name":

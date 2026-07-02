@@ -108,16 +108,21 @@ def _():
 # ------------------------------------------------------------------
 # 6. API Ninjas (only if key is present)
 # ------------------------------------------------------------------
-@check("API Ninjas: freeform lookup returns result (skipped if no key)")
+@check("API Ninjas / lookup() freeform returns non-None calories (key set)")
 def _():
     import nutrition
     if not nutrition.API_NINJAS_API_KEY:
         print("       (no API_NINJAS_API_KEY — skipping)", end="")
         return
-    result = nutrition.apininjas_nutrition("chicken breast")
-    assert result is not None, "API returned empty list"
-    assert result.calories is not None, f"calories is None; result={result}"
-    assert result.calories > 0, f"calories={result.calories} — expected > 0"
+    # Use lookup() not apininjas_nutrition() — we want to test the fallback path too.
+    # Free-tier keys return calories=None; lookup() should fall back to USDA in that case.
+    result = nutrition.lookup("chicken breast", kind="freeform")
+    assert result is not None, "lookup() returned None"
+    assert result.calories is not None, (
+        f"calories is None (API Ninjas free tier?); source={result.source}; "
+        "check that USDA fallback is working"
+    )
+    assert result.calories > 0, f"calories={result.calories}"
 
 
 # ------------------------------------------------------------------
