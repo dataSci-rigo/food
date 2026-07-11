@@ -118,13 +118,22 @@ def log_dose(med_name: str, dose_amount: float | None = None,
         return cur.lastrowid
 
 
-def get_today_doses() -> list[dict]:
+def get_today_doses(category: str | None = None) -> list[dict]:
     date = _today()
     with _conn() as con:
-        rows = con.execute(
-            "SELECT * FROM dose_log WHERE logged_at LIKE ? ORDER BY logged_at",
-            (f"{date}%",),
-        ).fetchall()
+        if category:
+            rows = con.execute(
+                """SELECT d.* FROM dose_log d
+                   LEFT JOIN med_catalog c ON d.med_name = c.name COLLATE NOCASE
+                   WHERE d.logged_at LIKE ? AND c.category = ?
+                   ORDER BY d.logged_at""",
+                (f"{date}%", category),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT * FROM dose_log WHERE logged_at LIKE ? ORDER BY logged_at",
+                (f"{date}%",),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 

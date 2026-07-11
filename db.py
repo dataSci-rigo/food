@@ -182,6 +182,28 @@ def delete_log(log_id: int):
         con.execute("DELETE FROM food_log WHERE id=?", (log_id,))
 
 
+def update_log_entry(
+    log_id: int,
+    food_name: str,
+    grams: float | None,
+    nutrients: dict,
+) -> None:
+    with _conn() as con:
+        con.execute(
+            """UPDATE food_log SET
+                food_name=?, grams_eaten=?, calories=?,
+                sat_fat_g=?, sodium_mg=?, carbs_g=?, sugar_g=?, fiber_g=?
+               WHERE id=?""",
+            (
+                food_name, grams,
+                nutrients.get("calories"), nutrients.get("sat_fat_g"),
+                nutrients.get("sodium_mg"), nutrients.get("carbs_g"),
+                nutrients.get("sugar_g"), nutrients.get("fiber_g"),
+                log_id,
+            ),
+        )
+
+
 def get_day_log(date: str) -> list[dict]:
     with _conn() as con:
         rows = con.execute(

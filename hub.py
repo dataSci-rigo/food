@@ -54,8 +54,10 @@ async def main():
         BotCommand(command="history",       description="7-day calorie summary"),
         BotCommand(command="fridge",        description="Show fridge contents"),
         BotCommand(command="workout_today", description="Today's workout log"),
-        BotCommand(command="meds",          description="Med/supplement catalog (tap to log)"),
-        BotCommand(command="med_log",       description="Today's doses taken"),
+        BotCommand(command="meds",          description="Medication catalog (tap to log)"),
+        BotCommand(command="med_log",       description="Today's medication doses"),
+        BotCommand(command="supps",         description="Supplement catalog (tap to log)"),
+        BotCommand(command="supp_log",      description="Today's supplement doses"),
         BotCommand(command="help",          description="Show help for current topic"),
     ])
 

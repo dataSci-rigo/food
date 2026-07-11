@@ -36,15 +36,26 @@ def _today() -> str:
     return datetime.now(config.TZ).strftime("%Y-%m-%d")
 
 
-def _catalog_keyboard() -> InlineKeyboardMarkup | None:
+def _fmt_time(utc_str: str) -> str:
+    from datetime import timezone
+    try:
+        dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+        return dt.astimezone(config.TZ).strftime("%H:%M")
+    except Exception:
+        return utc_str[11:16] if len(utc_str) > 15 else utc_str
+
+
+def _catalog_keyboard(category: str | None = None) -> InlineKeyboardMarkup | None:
     catalog = meds_db.get_catalog(active_only=True)
+    if category:
+        catalog = [m for m in catalog if m["category"] == category]
     if not catalog:
         return None
     buttons = []
     for med in catalog:
         dose_label = ""
         if med["dose_amount"] and med["dose_unit"]:
-            dose_label = f" {med['dose_amount']:.0f}{med['dose_unit']}"
+            dose_label = f" {med['dose_amount']:.4g}{med['dose_unit']}"
         label = f"{med['name']}{dose_label}"
         buttons.append([InlineKeyboardButton(
             text=label,
@@ -53,20 +64,18 @@ def _catalog_keyboard() -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _format_catalog() -> str:
+def _format_catalog(category: str | None = None) -> str:
     catalog = meds_db.get_catalog(active_only=True)
+    if category:
+        catalog = [m for m in catalog if m["category"] == category]
     if not catalog:
-        return "No medications or supplements in catalog. Use /add_med to add one."
-    by_cat: dict[str, list] = {}
-    for med in catalog:
-        by_cat.setdefault(med["category"], []).append(med)
-    lines = ["💊 *Med / Supplement Catalog*"]
-    for cat, meds in by_cat.items():
-        lines.append(f"\n_{cat.title()}_")
-        for m in meds:
-            dose = f" — {m['dose_amount']:.0f} {m['dose_unit']}" if m["dose_amount"] else ""
-            note = f"  _{m['notes']}_" if m["notes"] else ""
-            lines.append(f"  • {m['name']}{dose}{note}")
+        label = "medications" if category == "medication" else "supplements"
+        return f"No {label} in catalog yet."
+    lines = ["💊 *Medications*" if category == "medication" else "🌿 *Supplements*"]
+    for m in catalog:
+        dose = f" — {m['dose_amount']:.4g} {m['dose_unit']}" if m["dose_amount"] else ""
+        note = f"  _{m['notes']}_" if m["notes"] else ""
+        lines.append(f"  • {m['name']}{dose}{note}")
     return "\n".join(lines)
 
 
@@ -98,13 +107,18 @@ def _parse_add_med(text: str) -> tuple[str, float | None, str | None, str]:
 _HELP_TEXT = """\
 💊 <b>Meds &amp; Supplements</b>
 
-Tap a button below to log a dose, or use commands:
+<b>Medications</b>
+/meds — catalog with tap-to-log buttons
+/med_log — today's medication doses
+/add_med name [dose] [unit]
+  e.g. /add_med Metformin 500 mg
 
-/meds — show catalog with tap-to-log buttons
-/med_log — today's doses taken
-/add_med name [dose] [unit] [category]
-  e.g. /add_med Metformin 500 mg medication
-  e.g. /add_med "Vitamin D" 2000 IU supplement
+<b>Supplements</b>
+/supps — catalog with tap-to-log buttons
+/supp_log — today's supplement doses
+/add_supp name [dose] [unit]
+  e.g. /add_supp "Vitamin D" 2000 IU
+
 /remove_med name — deactivate from catalog
 """
 
@@ -125,25 +139,27 @@ async def cmd_website(msg: Message):
     await msg.reply(f"http://{ip}:9000/meds")
 
 
+# ---- Medications ----
+
 @router.message(_CHAN, _THR, Command("meds"))
 async def cmd_meds(msg: Message):
-    keyboard = _catalog_keyboard()
+    keyboard = _catalog_keyboard(category="medication")
     if keyboard is None:
-        await msg.reply("No meds in catalog. Use /add_med to add one.")
+        await msg.reply("No medications in catalog. Use /add_med name dose unit")
         return
-    await msg.reply(_format_catalog(), parse_mode="Markdown", reply_markup=keyboard)
+    await msg.reply(_format_catalog(category="medication"), parse_mode="Markdown", reply_markup=keyboard)
 
 
 @router.message(_CHAN, _THR, Command("med_log"))
 async def cmd_med_log(msg: Message):
-    doses = meds_db.get_today_doses()
+    doses = meds_db.get_today_doses(category="medication")
     if not doses:
-        await msg.reply("No doses logged today.")
+        await msg.reply("No medications logged today.")
         return
-    lines = [f"*Doses taken today*"]
+    lines = ["*Medications taken today*"]
     for d in doses:
-        time_str  = d["logged_at"][11:16]
-        dose_str  = f" {d['dose_amount']:.0f} {d['dose_unit']}" if d["dose_amount"] else ""
+        time_str = _fmt_time(d["logged_at"])
+        dose_str = f" {d['dose_amount']:.4g} {d['dose_unit']}" if d["dose_amount"] else ""
         lines.append(f"  {time_str} {d['med_name']}{dose_str}")
     await msg.reply("\n".join(lines), parse_mode="Markdown")
 
@@ -152,19 +168,64 @@ async def cmd_med_log(msg: Message):
 async def cmd_add_med(msg: Message):
     args = (msg.text or "").split(maxsplit=1)[1] if len((msg.text or "").split()) > 1 else ""
     if not args:
-        await msg.reply("Usage: /add_med name [dose] [unit] [category]\nExample: /add_med Metformin 500 mg medication")
+        await msg.reply("Usage: /add_med name [dose] [unit]\nExample: /add_med Metformin 500 mg")
         return
-    name, dose_amount, dose_unit, category = _parse_add_med(args)
+    name, dose_amount, dose_unit, _ = _parse_add_med(args)
     if not name:
         await msg.reply("Please provide a medication name.")
         return
-    meds_db.add_med(name, dose_amount, dose_unit, category)
-    dose_str = f" {dose_amount:.0f} {dose_unit}" if dose_amount else ""
+    meds_db.add_med(name, dose_amount, dose_unit, category="medication")
+    dose_str = f" {dose_amount:.4g} {dose_unit}" if dose_amount else ""
     await msg.reply(
-        f"✅ Added *{name}*{dose_str} to catalog as _{category}_.\n\nUse /meds to see your catalog.",
+        f"✅ Added *{name}*{dose_str} to medications.\n\nUse /meds to see your catalog.",
         parse_mode="Markdown",
     )
 
+
+# ---- Supplements ----
+
+@router.message(_CHAN, _THR, Command("supps"))
+async def cmd_supps(msg: Message):
+    keyboard = _catalog_keyboard(category="supplement")
+    if keyboard is None:
+        await msg.reply("No supplements in catalog. Use /add_supp name dose unit")
+        return
+    await msg.reply(_format_catalog(category="supplement"), parse_mode="Markdown", reply_markup=keyboard)
+
+
+@router.message(_CHAN, _THR, Command("supp_log"))
+async def cmd_supp_log(msg: Message):
+    doses = meds_db.get_today_doses(category="supplement")
+    if not doses:
+        await msg.reply("No supplements logged today.")
+        return
+    lines = ["*Supplements taken today*"]
+    for d in doses:
+        time_str = _fmt_time(d["logged_at"])
+        dose_str = f" {d['dose_amount']:.4g} {d['dose_unit']}" if d["dose_amount"] else ""
+        lines.append(f"  {time_str} {d['med_name']}{dose_str}")
+    await msg.reply("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(_CHAN, _THR, Command("add_supp"))
+async def cmd_add_supp(msg: Message):
+    args = (msg.text or "").split(maxsplit=1)[1] if len((msg.text or "").split()) > 1 else ""
+    if not args:
+        await msg.reply('Usage: /add_supp name [dose] [unit]\nExample: /add_supp "Vitamin D" 2000 IU')
+        return
+    name, dose_amount, dose_unit, _ = _parse_add_med(args)
+    if not name:
+        await msg.reply("Please provide a supplement name.")
+        return
+    meds_db.add_med(name, dose_amount, dose_unit, category="supplement")
+    dose_str = f" {dose_amount:.4g} {dose_unit}" if dose_amount else ""
+    await msg.reply(
+        f"✅ Added *{name}*{dose_str} to supplements.\n\nUse /supps to see your catalog.",
+        parse_mode="Markdown",
+    )
+
+
+# ---- Shared remove ----
 
 @router.message(_CHAN, _THR, Command("remove_med"))
 async def cmd_remove_med(msg: Message):
@@ -175,7 +236,7 @@ async def cmd_remove_med(msg: Message):
         return
     removed = meds_db.remove_med(name)
     if removed:
-        await msg.reply(f"Removed *{name}* from active catalog.", parse_mode="Markdown")
+        await msg.reply(f"Removed *{name}* from catalog.", parse_mode="Markdown")
     else:
         await msg.reply(f"*{name}* not found in catalog.", parse_mode="Markdown")
 
