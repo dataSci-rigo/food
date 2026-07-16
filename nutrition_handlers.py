@@ -80,9 +80,10 @@ def _format_budget(totals: dict) -> str:
 def _rating_keyboard(log_ids: list[int]) -> InlineKeyboardMarkup:
     ids_str = ",".join(str(i) for i in log_ids)
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="👍 Liked it",    callback_data=f"n:like:{ids_str}"),
-        InlineKeyboardButton(text="👎 Didn't like", callback_data=f"n:dislike:{ids_str}"),
-        InlineKeyboardButton(text="— Skip",         callback_data=f"n:skip:{ids_str}"),
+        InlineKeyboardButton(text="👍",        callback_data=f"n:like:{ids_str}"),
+        InlineKeyboardButton(text="👎",        callback_data=f"n:dislike:{ids_str}"),
+        InlineKeyboardButton(text="🍕 Cheat", callback_data=f"n:cheat:{ids_str}"),
+        InlineKeyboardButton(text="—",         callback_data=f"n:skip:{ids_str}"),
     ]])
 
 
@@ -251,6 +252,19 @@ def _scale_nutrients(per_100g: dict, grams: float) -> dict:
     return {k: (v or 0) * scale for k, v in per_100g.items()}
 
 
+def _grams_prompt(food_name: str, cached: dict) -> str:
+    """Return the appropriate grams/qty prompt for a food that needs user input."""
+    if cached.get("prompt_type") == "qty" and cached.get("serving_g"):
+        srv = cached["serving_g"]
+        cal = cached.get("calories") or 0
+        return (
+            f"How many *{food_name}*?\n"
+            f"1 = {srv:.0f}g, ~{cal:.0f} kcal\n"
+            f"_(e.g. 1, 2, 0.5)_"
+        )
+    return f"How many grams of *{food_name}* did you eat?"
+
+
 def _breakdown_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Agree",   callback_data="bkd:agree"),
@@ -300,7 +314,11 @@ async def _show_breakdown_ingredient(send_msg: Message, pending: dict):
 
 async def _lookup_and_log(
     food_str: str, user_input: str, date: str, grams_override: float | None = None,
-) -> tuple[str, int | None]:
+) -> tuple[str, int | None, dict | None]:
+    """
+    Returns (line_text, log_id, cached_result).
+    cached_result is non-None only when log_id is None due to needing grams/qty input.
+    """
     # Check local catalog first
     catalog_hit = db.catalog_search(food_str)
     if catalog_hit:
@@ -309,7 +327,18 @@ async def _lookup_and_log(
         if grams is None and catalog_hit.get("serving_g"):
             grams = catalog_hit["serving_g"]
         if grams is None:
-            return f"__needs_grams__{name}", None
+            cached = {
+                "name": name, "source": "catalog", "basis": "per_100g",
+                "prompt_type": "grams",
+                "calories":  catalog_hit.get("cal_per_100g"),
+                "sat_fat_g": catalog_hit.get("sat_fat_per_100g"),
+                "sodium_mg": catalog_hit.get("sodium_per_100g"),
+                "carbs_g":   catalog_hit.get("carbs_per_100g"),
+                "sugar_g":   catalog_hit.get("sugar_per_100g"),
+                "fiber_g":   catalog_hit.get("fiber_per_100g"),
+                "serving_g": catalog_hit.get("serving_g"),
+            }
+            return f"__needs_grams__{name}", None, cached
         scale = grams / 100
         nutrients = {
             "calories":  (catalog_hit.get("cal_per_100g") or 0) * scale,
@@ -345,7 +374,7 @@ async def _lookup_and_log(
         sat      = nutrients.get("sat_fat_g", 0)
         sod      = nutrients.get("sodium_mg", 0)
         return (f"• {name} ({grams:.0f}g) — {cal:.0f} kcal, {gi_str}, "
-                f"{sat:.1f}g sat fat, {sod:.0f}mg sodium  📋"), log_id
+                f"{sat:.1f}g sat fat, {sod:.0f}mg sodium  📋"), log_id, None
 
     try:
         result = nutrition_lookup(food_str)
@@ -353,12 +382,26 @@ async def _lookup_and_log(
         log.warning("nutrition_lookup failed for %r: %s", food_str, e)
         result = None
     if result is None:
-        return f"• {food_str} — couldn't find nutrition data", None
+        return f"• {food_str} — couldn't find nutrition data", None, None
 
     grams    = grams_override
     nutrients: dict = {}
 
     if result.basis == "per_serving" and result.serving_g:
+        # Nutritionix restaurant items: ask "how many?" instead of logging immediately
+        if result.source == "nutritionix" and grams_override is None:
+            cached = {
+                "name": result.name, "source": result.source, "basis": "per_serving",
+                "prompt_type": "qty",
+                "calories":  result.calories,
+                "sat_fat_g": result.saturated_fat_g,
+                "sodium_mg": result.sodium_mg,
+                "carbs_g":   result.carbs_g,
+                "sugar_g":   result.sugar_g,
+                "fiber_g":   result.fiber_g,
+                "serving_g": result.serving_g,
+            }
+            return f"__needs_grams__{result.name}", None, cached
         grams = grams or result.serving_g
         scale = grams / result.serving_g if grams else 1.0
         nutrients = {
@@ -375,7 +418,18 @@ async def _lookup_and_log(
         }
     elif result.basis == "per_100g":
         if grams is None:
-            return f"__needs_grams__{result.name}", None
+            cached = {
+                "name": result.name, "source": result.source, "basis": "per_100g",
+                "prompt_type": "grams",
+                "calories":  result.calories,
+                "sat_fat_g": result.saturated_fat_g,
+                "sodium_mg": result.sodium_mg,
+                "carbs_g":   result.carbs_g,
+                "sugar_g":   result.sugar_g,
+                "fiber_g":   result.fiber_g,
+                "serving_g": result.serving_g,
+            }
+            return f"__needs_grams__{result.name}", None, cached
         scale = grams / 100
         nutrients = {
             "calories":  (result.calories or 0) * scale,
@@ -393,7 +447,7 @@ async def _lookup_and_log(
             },
         }
     else:
-        return f"• {food_str} — unexpected data format", None
+        return f"• {food_str} — unexpected data format", None, None
 
     gi_val, gi_src = await asyncio.get_event_loop().run_in_executor(
         None,
@@ -417,7 +471,7 @@ async def _lookup_and_log(
     sat      = nutrients.get("sat_fat_g", 0)
     sod      = nutrients.get("sodium_mg", 0)
     return (f"• {result.name}{gram_str} — "
-            f"{cal:.0f} kcal, {gi_str}, {sat:.1f}g sat fat, {sod:.0f}mg sodium"), log_id
+            f"{cal:.0f} kcal, {gi_str}, {sat:.1f}g sat fat, {sod:.0f}mg sodium"), log_id, None
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +497,15 @@ Send a photo of a nutrition label to log from it.
 /today — today's log + totals
 /budget — remaining daily allowance
 /history — 7-day calorie summary
+/cheats [7|14] — cheat meal history
+
+*Saved Meals*
+/menu — tap-to-log all saved meals
+/save\\_meal Name — AI-guided new meal builder
+/recipes — text list of saved meals
+/log\\_recipe name — log by name
+/del\\_recipe name — delete a meal
 /catalog — saved nutrition labels
-/recipes — saved meal recipes
 """
 
 
@@ -641,10 +702,13 @@ async def handle_text(msg: Message):
     if state == "awaiting_recipe_name":
         await _handle_save_recipe_name(msg, state_row["pending"])
         return
+    if state == "awaiting_save_meal_custom":
+        await _handle_save_meal_custom(msg, state_row["pending"])
+        return
     if state == "awaiting_rating":
         db.clear_state(msg.chat.id)
         await msg.reply("Rating skipped.")
-    if state in ("awaiting_cmp_choice", "breakdown_review"):
+    if state in ("awaiting_cmp_choice", "breakdown_review", "save_meal_review"):
         # User typed a new message instead of tapping a button — clear old state
         db.clear_state(msg.chat.id)
 
@@ -733,10 +797,13 @@ async def _handle_log(msg: Message, foods: list[str], user_input: str, reply_fn=
 
     verify_tasks: list = []
     for food_str in foods:
-        line, log_id = await _lookup_and_log(food_str, user_input, date)
+        line, log_id, cached = await _lookup_and_log(food_str, user_input, date)
         if line.startswith("__needs_grams__"):
             food_name = line.replace("__needs_grams__", "")
-            pending_foods.append({"food_str": food_str, "user_input": user_input, "food_name": food_name})
+            pending_foods.append({
+                "food_str": food_str, "user_input": user_input,
+                "food_name": food_name, "cached_result": cached,
+            })
         elif log_id is not None:
             reply_lines.append(line)
             log_ids.append(log_id)
@@ -764,11 +831,13 @@ async def _handle_log(msg: Message, foods: list[str], user_input: str, reply_fn=
         asyncio.create_task(_ai_verify(msg, food_name, grams, nutrients))
 
     if pending_foods:
-        first = pending_foods[0]
+        first  = pending_foods[0]
+        cached = first.get("cached_result") or {}
         db.set_state(msg.chat.id, "awaiting_grams", {
             "foods": pending_foods, "idx": 0, "log_ids": log_ids, "date": date,
         })
-        await reply_fn(f"How many grams of *{first['food_name']}* did you eat?", parse_mode="Markdown")
+        prompt = _grams_prompt(first["food_name"], cached)
+        await reply_fn(prompt, parse_mode="Markdown")
 
 
 async def _handle_grams(msg: Message, pending: dict):
@@ -820,7 +889,7 @@ async def _handle_grams(msg: Message, pending: dict):
         return
 
     try:
-        grams = float(re.search(r"[\d.]+", text).group())
+        qty = float(re.search(r"[\d.]+", text).group())
     except (AttributeError, ValueError):
         await msg.reply("Please send a number (grams).")
         return
@@ -830,15 +899,59 @@ async def _handle_grams(msg: Message, pending: dict):
     log_ids = pending.get("log_ids", [])
     date    = pending.get("date", _today())
     food    = foods[idx]
+    cached  = food.get("cached_result")
+    log_id  = None
+    line    = ""
 
-    line, log_id = await _lookup_and_log(food["food_str"], food["user_input"], date, grams_override=grams)
+    if cached:
+        # Use cached lookup result — no second API call needed
+        if cached.get("prompt_type") == "qty" and cached.get("serving_g"):
+            # Nutritionix per-serving: qty is number of servings
+            srv    = cached["serving_g"]
+            actual_grams = qty * srv
+            nutrients = {
+                "calories":  (cached.get("calories")  or 0) * qty,
+                "sat_fat_g": (cached.get("sat_fat_g") or 0) * qty,
+                "sodium_mg": (cached.get("sodium_mg") or 0) * qty,
+                "carbs_g":   (cached.get("carbs_g")   or 0) * qty,
+                "sugar_g":   (cached.get("sugar_g")   or 0) * qty,
+                "fiber_g":   (cached.get("fiber_g")   or 0) * qty,
+                "_per_100g": {},
+            }
+        else:
+            # per_100g: qty is grams
+            actual_grams = qty
+            per100 = {k: cached.get(k) for k in
+                      ("calories","sat_fat_g","sodium_mg","carbs_g","sugar_g","fiber_g")}
+            nutrients = _scale_nutrients(per100, actual_grams)
+            nutrients["_per_100g"] = per100
+
+        log_id = db.log_food(
+            date=date, user_input=food["user_input"],
+            food_name=cached["name"], source=cached["source"],
+            grams=actual_grams, nutrients=nutrients, gi=None, gi_source=None,
+        )
+        cal  = nutrients.get("calories", 0)
+        sat  = nutrients.get("sat_fat_g", 0)
+        sod  = nutrients.get("sodium_mg", 0)
+        line = (f"• {cached['name']} ({actual_grams:.0f}g) — "
+                f"{cal:.0f} kcal, {sat:.1f}g sat fat, {sod:.0f}mg sodium")
+        asyncio.create_task(_ai_verify(msg, cached["name"], actual_grams, nutrients))
+    else:
+        # Fallback: re-fetch (handles edge cases where no cached result was stored)
+        line, log_id, _ = await _lookup_and_log(
+            food["food_str"], food["user_input"], date, grams_override=qty
+        )
+        if log_id:
+            row = next((r for r in db.get_day_log(date) if r["id"] == log_id), None)
+            if row:
+                asyncio.create_task(_ai_verify(msg, food["food_str"], qty, {
+                    "calories": row["calories"], "carbs_g": row["carbs_g"],
+                    "sat_fat_g": row["sat_fat_g"],
+                }))
+
     if log_id:
         log_ids.append(log_id)
-        row = next((r for r in db.get_day_log(date) if r["id"] == log_id), None)
-        if row:
-            asyncio.create_task(_ai_verify(msg, food["food_str"], grams, {
-                "calories": row["calories"], "carbs_g": row["carbs_g"], "sat_fat_g": row["sat_fat_g"],
-            }))
 
     idx += 1
     if idx < len(foods):
@@ -846,8 +959,9 @@ async def _handle_grams(msg: Message, pending: dict):
             "foods": foods, "idx": idx, "log_ids": log_ids, "date": date,
         })
         next_food = foods[idx]
-        await msg.reply(f"{line}\n\nHow many grams of *{next_food['food_name']}* did you eat?",
-                        parse_mode="Markdown")
+        next_cached = next_food.get("cached_result") or {}
+        prompt = _grams_prompt(next_food["food_name"], next_cached)
+        await msg.reply(f"{line}\n\n{prompt}", parse_mode="Markdown")
     else:
         db.clear_state(msg.chat.id)
         totals = db.get_day_totals(date)
@@ -979,6 +1093,13 @@ async def handle_rating(cb: CallbackQuery):
 
     if action == "skip":
         await cb.answer("OK, noted.")
+        await cb.message.edit_reply_markup(reply_markup=None)
+        return
+
+    if action == "cheat":
+        for log_id in log_ids:
+            db.mark_cheat(log_id)
+        await cb.answer("🍕 Marked as cheat meal")
         await cb.message.edit_reply_markup(reply_markup=None)
         return
 
@@ -1311,6 +1432,353 @@ async def handle_recipe_cb(cb: CallbackQuery):
     pending = state_row["pending"]
     db.set_state(cb.message.chat.id, "awaiting_recipe_name", pending)
     await cb.message.answer("What should I call this recipe? (e.g. 'Fried eggs with toast')")
+
+
+# ---------------------------------------------------------------------------
+# /cheats command
+# ---------------------------------------------------------------------------
+
+@router.message(_CHAN, _THR, Command("cheats"))
+async def cmd_cheats(msg: Message):
+    args = (msg.text or "").split()
+    days = 7
+    if len(args) > 1:
+        try:
+            days = int(args[1])
+        except ValueError:
+            pass
+    days = max(1, min(days, 30))
+    rows = db.get_cheat_history(days)
+    if not rows:
+        await msg.reply(f"No cheat meals logged in the last {days} days. 🥗")
+        return
+    lines = [f"🍕 *Cheat meals — last {days} days*"]
+    for r in rows:
+        date_str = r["date"]
+        name     = r["food_name"]
+        cal      = r.get("calories") or 0
+        lines.append(f"  {date_str}  {name} — {cal:.0f} kcal")
+    total_cal = sum((r.get("calories") or 0) for r in rows)
+    lines.append(f"\n{len(rows)} entries, {total_cal:.0f} kcal total")
+    await msg.reply("\n".join(lines), parse_mode="Markdown")
+
+
+# ---------------------------------------------------------------------------
+# /menu command — tap-to-log recipe keyboard
+# ---------------------------------------------------------------------------
+
+@router.message(_CHAN, _THR, Command("menu"))
+async def cmd_menu(msg: Message):
+    recipes = db.recipe_list()
+    if not recipes:
+        await msg.reply(
+            "No saved meals yet.\n\n"
+            "Use /save\\_meal or the 🔍 Breakdown flow to create one.",
+            parse_mode="Markdown",
+        )
+        return
+    buttons = []
+    for r in recipes:
+        cal   = r["total"].get("calories", 0) or 0
+        label = f"{r['name']}  (~{cal:.0f} kcal)"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"menu:log:{r['name']}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await msg.reply("🍽 *Saved Meals* — tap to log:", parse_mode="Markdown", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("menu:log:"))
+async def handle_menu_log(cb: CallbackQuery):
+    if cb.message.chat.id != config.CHANNEL_ID:
+        return
+    name   = cb.data.split(":", 2)[2]
+    recipe = db.recipe_get(name)
+    if not recipe:
+        await cb.answer("Recipe not found.")
+        await cb.message.edit_reply_markup(reply_markup=None)
+        return
+    await cb.answer()
+    await cb.message.edit_reply_markup(reply_markup=None)
+    date  = _today()
+    lines = [f"Logged *{recipe['name']}*:"]
+    ids   = []
+    for ing in recipe["ingredients"]:
+        grams  = ing.get("final_grams") or ing.get("claude_grams") or 0
+        per100 = ing.get("lookup_per_100g")
+        if per100:
+            nutrients = _scale_nutrients(per100, grams)
+        else:
+            nutrients = {k: ing.get(f"claude_{k}", 0) for k in
+                         ("calories","carbs_g","sat_fat_g","sodium_mg","sugar_g","fiber_g")}
+        log_id = db.log_food(
+            date=date, user_input=f"[menu] {recipe['name']}",
+            food_name=ing.get("lookup_name") or ing.get("name", "?"),
+            source="recipe", grams=grams, nutrients=nutrients, gi=None, gi_source=None,
+        )
+        ids.append(log_id)
+        lines.append(f"  • {ing.get('name','?')} — {(nutrients.get('calories') or 0):.0f} kcal")
+    totals = db.get_day_totals(date)
+    lim    = config.DAILY_LIMITS
+    lines.append(
+        f"\nToday: {totals['calories']:.0f} / {lim['calories']} kcal  "
+        f"{_progress_bar(totals['calories'], lim['calories'])}"
+    )
+    await cb.message.answer(
+        "\n".join(lines), parse_mode="Markdown",
+        reply_markup=_rating_keyboard(ids) if ids else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /del_recipe command
+# ---------------------------------------------------------------------------
+
+@router.message(_CHAN, _THR, Command("del_recipe"))
+async def cmd_del_recipe(msg: Message):
+    args = (msg.text or "").split(maxsplit=1)
+    name = args[1].strip() if len(args) > 1 else ""
+    if not name:
+        await msg.reply("Usage: /del\\_recipe name", parse_mode="Markdown")
+        return
+    removed = db.recipe_delete(name)
+    if removed:
+        await msg.reply(f"🗑 Deleted *{name}* from your meal menu.", parse_mode="Markdown")
+    else:
+        await msg.reply(f"*{name}* not found. Use /recipes to list saved ones.", parse_mode="Markdown")
+
+
+# ---------------------------------------------------------------------------
+# /save_meal — AI-guided ingredient flow
+# ---------------------------------------------------------------------------
+
+async def _ai_save_meal_plan(meal_name: str) -> list[dict]:
+    """Ask AI for typical ingredients + logarithmic gram options for a named meal."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
+    resp = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        messages=[{"role": "user", "content":
+            f"List the typical ingredients in '{meal_name}'.\n"
+            "For each ingredient provide 4 realistic gram amounts spread logarithmically "
+            "(smallest to largest, covering the likely range a person would eat).\n"
+            "Return ONLY a JSON array:\n"
+            '[{"name":"rolled oats","options":[30,60,90,120]},'
+            '{"name":"almond milk","options":[120,180,240,360]}]\n'
+            "Provide 3–6 ingredients. Use grams (or ml, treated as grams)."
+        }],
+    )
+    raw = resp.content[0].text.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    return json.loads(raw)
+
+
+async def _ai_estimate_ingredients_batch(agreed: list[dict]) -> list[dict]:
+    """Estimate calories/macros for a list of {name, grams} dicts in one call."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
+    lines  = "\n".join(f"{i+1}. {a['grams']:.0f}g {a['name']}" for i, a in enumerate(agreed))
+    resp = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        messages=[{"role": "user", "content":
+            f"Estimate nutrition for each item:\n{lines}\n"
+            'Return ONLY a JSON array (same order): '
+            '[{"calories":0,"carbs_g":0,"sat_fat_g":0,"sodium_mg":0,"sugar_g":0,"fiber_g":0}]'
+        }],
+    )
+    raw = resp.content[0].text.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    return json.loads(raw)
+
+
+async def _ai_parse_custom_amount(ingredient_name: str, user_text: str) -> float:
+    """Convert a user description like '3 tablespoons' to grams."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
+    resp = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=50,
+        messages=[{"role": "user", "content":
+            f"Convert '{user_text}' of '{ingredient_name}' to grams.\n"
+            'Return ONLY JSON: {"grams": 85}'
+        }],
+    )
+    raw = resp.content[0].text.strip()
+    raw = re.sub(r"^```[a-z]*\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    return float(json.loads(raw)["grams"])
+
+
+def _save_meal_keyboard(idx: int, options: list[int]) -> InlineKeyboardMarkup:
+    """Inline keyboard for a /save_meal ingredient: gram options + None + Other."""
+    row1 = [
+        InlineKeyboardButton(text=f"{g}g", callback_data=f"smeal:gram:{idx}:{g}")
+        for g in options
+    ]
+    row2 = [
+        InlineKeyboardButton(text="❌ None",  callback_data=f"smeal:none:{idx}"),
+        InlineKeyboardButton(text="✏️ Other", callback_data=f"smeal:other:{idx}"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2])
+
+
+async def _show_save_meal_ingredient(send_fn, pending: dict):
+    ingredients = pending["ingredients"]
+    idx         = pending["idx"]
+    ing         = ingredients[idx]
+    total       = len(ingredients)
+    await send_fn(
+        f"*{pending['meal_name']}* — Ingredient {idx+1}/{total}\n\n"
+        f"*{ing['name']}* — how much?",
+        parse_mode="Markdown",
+        reply_markup=_save_meal_keyboard(idx, ing["options"]),
+    )
+
+
+async def _finalize_save_meal(msg_or_cb, pending: dict, chat_id: int):
+    """Called after all ingredients have been reviewed. Estimates calories + saves recipe."""
+    meal_name   = pending["meal_name"]
+    ingredients = pending["ingredients"]
+    agreed      = [i for i in ingredients if i.get("grams") is not None]
+
+    if not agreed:
+        db.clear_state(chat_id)
+        send = msg_or_cb.answer if hasattr(msg_or_cb, "answer") else msg_or_cb.reply
+        await send("No ingredients selected — meal not saved.")
+        return
+
+    send = msg_or_cb.answer if hasattr(msg_or_cb, "answer") else msg_or_cb.reply
+    wait = await send("⏳ Estimating nutrition...")
+
+    try:
+        estimates = await _ai_estimate_ingredients_batch(agreed)
+    except Exception as e:
+        await wait.edit_text(f"Couldn't estimate nutrition: {e}")
+        db.clear_state(chat_id)
+        return
+
+    recipe_ingredients = []
+    total: dict = {"calories": 0, "carbs_g": 0, "sat_fat_g": 0,
+                   "sodium_mg": 0, "sugar_g": 0, "fiber_g": 0}
+    for i, (a, est) in enumerate(zip(agreed, estimates)):
+        cal = est.get("calories", 0)
+        recipe_ingredients.append({
+            "name":            a["name"],
+            "claude_grams":    a["grams"],
+            "final_grams":     a["grams"],
+            "claude_calories": cal,
+            "claude_carbs_g":  est.get("carbs_g", 0),
+            "claude_sat_fat_g":est.get("sat_fat_g", 0),
+            "claude_sodium_mg":est.get("sodium_mg", 0),
+            "claude_sugar_g":  est.get("sugar_g", 0),
+            "claude_fiber_g":  est.get("fiber_g", 0),
+            "lookup_found":    False,
+            "status":          "agreed",
+        })
+        for k in total:
+            total[k] += est.get(k, 0) or 0
+
+    db.recipe_save(meal_name, f"[save_meal] {meal_name}", recipe_ingredients, total)
+    db.clear_state(chat_id)
+
+    lines = [f"✅ Saved *{meal_name}* to your menu!"]
+    for a, est in zip(agreed, estimates):
+        lines.append(f"  • {a['name']} ({a['grams']:.0f}g) — {est.get('calories',0):.0f} kcal")
+    lines.append(f"\nTotal: ~{total['calories']:.0f} kcal  •  Use /menu to log it.")
+    await wait.edit_text("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(_CHAN, _THR, Command("save_meal"))
+async def cmd_save_meal(msg: Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    meal_name = parts[1].strip() if len(parts) > 1 else ""
+    if not meal_name:
+        await msg.reply(
+            "Usage: /save\\_meal Meal Name\n"
+            "Example: /save\\_meal Overnight Oats",
+            parse_mode="Markdown",
+        )
+        return
+    wait = await msg.reply(f"🔍 Planning *{meal_name}*...", parse_mode="Markdown")
+    try:
+        ingredients = await _ai_save_meal_plan(meal_name)
+    except Exception as e:
+        await wait.edit_text(f"Couldn't plan meal: {e}")
+        return
+
+    pending = {
+        "meal_name":   meal_name,
+        "ingredients": [{"name": i["name"], "options": i["options"], "grams": None}
+                        for i in ingredients],
+        "idx": 0,
+    }
+    db.set_state(msg.chat.id, "save_meal_review", pending)
+    await wait.delete()
+    await _show_save_meal_ingredient(msg.reply, pending)
+
+
+async def _handle_save_meal_custom(msg: Message, pending: dict):
+    """User typed a custom amount for a /save_meal ingredient."""
+    idx  = pending["idx"]
+    ing  = pending["ingredients"][idx]
+    try:
+        grams = await _ai_parse_custom_amount(ing["name"], msg.text.strip())
+    except Exception:
+        await msg.reply("Couldn't parse that amount. Please try again (e.g. '80g', '2 tbsp').")
+        return
+    ing["grams"] = grams
+    idx += 1
+    pending["idx"] = idx
+    if idx < len(pending["ingredients"]):
+        db.set_state(msg.chat.id, "save_meal_review", pending)
+        await _show_save_meal_ingredient(msg.reply, pending)
+    else:
+        await _finalize_save_meal(msg, pending, msg.chat.id)
+
+
+@router.callback_query(F.data.startswith("smeal:"))
+async def handle_save_meal_cb(cb: CallbackQuery):
+    if cb.message.chat.id != config.CHANNEL_ID:
+        return
+    parts  = cb.data.split(":")
+    action = parts[1]
+    idx    = int(parts[2])
+
+    state_row = db.get_state(cb.message.chat.id)
+    if not state_row or state_row["state"] not in ("save_meal_review", "awaiting_save_meal_custom"):
+        await cb.answer("Session expired — use /save_meal to start over.")
+        await cb.message.edit_reply_markup(reply_markup=None)
+        return
+
+    pending     = state_row["pending"]
+    ingredients = pending["ingredients"]
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer()
+
+    if action == "none":
+        ingredients[idx]["grams"] = None  # explicitly skipped
+        idx += 1
+    elif action == "gram":
+        ingredients[idx]["grams"] = float(parts[3])
+        idx += 1
+    elif action == "other":
+        pending["idx"] = idx
+        db.set_state(cb.message.chat.id, "awaiting_save_meal_custom", pending)
+        ing = ingredients[idx]
+        await cb.message.answer(
+            f"How much *{ing['name']}*? _(e.g. '80g', '2 tbsp', 'half cup')_",
+            parse_mode="Markdown",
+        )
+        return
+
+    pending["idx"] = idx
+    if idx < len(ingredients):
+        db.set_state(cb.message.chat.id, "save_meal_review", pending)
+        await _show_save_meal_ingredient(cb.message.answer, pending)
+    else:
+        await _finalize_save_meal(cb.message, pending, cb.message.chat.id)
 
 
 # ---------------------------------------------------------------------------

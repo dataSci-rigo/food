@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone  # timezone used in food_add
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -331,6 +331,15 @@ def food():
         <span>Sodium mg</span>
         <input type="number" name="sodium_mg" step="1" style="width:75px" placeholder="0">
       </div>
+      <div class="field">
+        <span>Time (optional)</span>
+        <input type="time" name="time" style="width:100px" title="Leave blank for now">
+      </div>
+      <div class="field" style="justify-content:flex-end;padding-bottom:2px">
+        <label style="display:flex;align-items:center;gap:5px;font-size:.85em;cursor:pointer">
+          <input type="checkbox" name="cheat" value="1"> 🍕 Cheat
+        </label>
+      </div>
       <div style="align-self:flex-end">
         <button type="submit" class="btn btn-save">Add</button>
       </div>
@@ -437,7 +446,7 @@ def food_edit(entry_id: int):
 
 @app.route("/food/add", methods=["POST"])
 def food_add():
-    date = request.form.get("date", _today())
+    date      = request.form.get("date", _today())
     food_name = (request.form.get("food_name") or "").strip()
     if not food_name:
         return redirect(url_for("food", date=date))
@@ -456,11 +465,21 @@ def food_add():
         "sugar_g":   0.0,
         "fiber_g":   0.0,
     }
-    grams = _n("grams") or None
+    grams      = _n("grams") or None
+    cheat      = request.form.get("cheat") == "1"
+    time_str   = (request.form.get("time") or "").strip()
+    logged_at  = None
+    if time_str:
+        try:
+            naive     = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M")
+            logged_at = naive.replace(tzinfo=config.TZ).astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+
     db.log_food(
         date=date, user_input=food_name, food_name=food_name,
         source="manual", grams=grams, nutrients=nutrients,
-        gi=None, gi_source=None,
+        gi=None, gi_source=None, logged_at=logged_at, cheat=cheat,
     )
     return redirect(url_for("food", date=date))
 

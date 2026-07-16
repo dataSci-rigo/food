@@ -10,10 +10,12 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN        = os.environ["food_bot"]
-OWNER_CHAT_ID    = int(str(os.environ.get("OWNER_CHAT_ID", "0")).strip("'\""))
-ANTHROPIC_KEY    = os.environ["ANTHROPIC_API_KEY"]
-VM_TAILSCALE_IP  = os.environ.get("VM_TAILSCALE_IP", "")
+BOT_TOKEN           = os.environ["food_bot"]
+OWNER_CHAT_ID       = int(str(os.environ.get("OWNER_CHAT_ID", "0")).strip("'\""))
+ANTHROPIC_KEY       = os.environ["ANTHROPIC_API_KEY"]
+VM_TAILSCALE_IP     = os.environ.get("VM_TAILSCALE_IP", "")
+NUTRITIONIX_APP_ID  = os.environ.get("NUTRITIONIX_APP_ID", "")
+NUTRITIONIX_API_KEY = os.environ.get("NUTRITIONIX_API_KEY", "")
 TZ            = ZoneInfo("America/Los_Angeles")
 
 _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")

@@ -47,9 +47,13 @@ def init_db():
                 liked       INTEGER
             )
         """)
-        # Migrate existing DBs that predate fiber_g column
+        # Migrate existing DBs that predate fiber_g / cheat columns
         try:
             con.execute("ALTER TABLE food_log ADD COLUMN fiber_g REAL")
+        except Exception:
+            pass
+        try:
+            con.execute("ALTER TABLE food_log ADD COLUMN cheat INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass
         con.execute("""
@@ -123,15 +127,17 @@ def log_food(
     nutrients: dict,   # keys: calories, sat_fat_g, sodium_mg, carbs_g, sugar_g, fiber_g (scaled)
     gi: float | None,
     gi_source: str | None,
+    logged_at: str | None = None,
+    cheat: bool = False,
 ) -> int:
-    now = _now_utc()
+    now = logged_at or _now_utc()
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO food_log
                (date, logged_at, user_input, food_name, source,
                 grams_eaten, calories, sat_fat_g, sodium_mg, carbs_g, sugar_g, fiber_g,
-                glycemic_index, gi_source)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                glycemic_index, gi_source, cheat)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 date, now, user_input, food_name, source,
                 grams,
@@ -143,6 +149,7 @@ def log_food(
                 nutrients.get("fiber_g"),
                 gi,
                 gi_source,
+                1 if cheat else 0,
             ),
         )
         row_id = cur.lastrowid
@@ -180,6 +187,24 @@ def update_liked(log_id: int, liked: bool):
 def delete_log(log_id: int):
     with _conn() as con:
         con.execute("DELETE FROM food_log WHERE id=?", (log_id,))
+
+
+def mark_cheat(log_id: int) -> None:
+    with _conn() as con:
+        con.execute("UPDATE food_log SET cheat=1 WHERE id=?", (log_id,))
+
+
+def get_cheat_history(days: int = 7) -> list[dict]:
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Los_Angeles")
+    since = (datetime.now(tz) - timedelta(days=days)).strftime("%Y-%m-%d")
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM food_log WHERE cheat=1 AND date >= ? ORDER BY logged_at DESC",
+            (since,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def update_log_entry(

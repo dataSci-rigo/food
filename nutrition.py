@@ -1,19 +1,17 @@
 """
-nutrition.py — one lookup() interface over three free nutrition sources.
+nutrition.py — one lookup() interface over nutrition sources.
 
 Routing (auto):
     barcode  (8-14 digit string)        -> Open Food Facts   (no key needed)
     freeform ("2 eggs and toast")       -> API Ninjas        (NLP parsing)
-    plain name ("chicken thigh")        -> USDA FoodData      (authoritative)
+    plain name ("chicken thigh")        -> Nutritionix branded DB (if keys set),
+                                           then USDA FoodData (authoritative)
 
-Every provider returns the same FoodResult shape, so the rest of your app
-never branches on which source answered. To "reduce capabilities" later,
-just delete a provider and its branch in lookup() — nothing else changes.
-
-Keys (set as env vars, or pass into the provider):
-    USDA_API_KEY        from https://fdc.nal.usda.gov/api-key-signup.html
-                        (DEMO_KEY works for light testing, low rate limit)
-    API_NINJAS_API_KEY  from https://api-ninjas.com (free tier)
+Keys (set as env vars):
+    USDA_API_KEY           from https://fdc.nal.usda.gov/api-key-signup.html
+    API_NINJAS_API_KEY     from https://api-ninjas.com (free tier)
+    NUTRITIONIX_APP_ID   } from https://developer.nutritionix.com (free tier)
+    NUTRITIONIX_API_KEY  }   500 req/day, has restaurant chain menus
 Open Food Facts needs no key.
 """
 
@@ -26,8 +24,10 @@ from typing import Optional
 
 import requests
 
-USDA_API_KEY = os.environ.get("USDA_API_KEY", "DEMO_KEY")
-API_NINJAS_API_KEY = os.environ.get("API_NINJAS_API_KEY", "")
+USDA_API_KEY        = os.environ.get("USDA_API_KEY", "DEMO_KEY")
+API_NINJAS_API_KEY  = os.environ.get("API_NINJAS_API_KEY", "")
+NUTRITIONIX_APP_ID  = os.environ.get("NUTRITIONIX_APP_ID", "")
+NUTRITIONIX_API_KEY = os.environ.get("NUTRITIONIX_API_KEY", "")
 TIMEOUT = 10
 # Identify yourself to Open Food Facts per their API etiquette.
 HEADERS = {"User-Agent": "nutrition-mvp/0.1 (contact@example.com)"}
@@ -199,6 +199,69 @@ def apininjas_nutrition(query: str) -> Optional[FoodResult]:
 
 
 # --------------------------------------------------------------------------
+# Provider 4: Nutritionix  (branded / restaurant chain items)
+# --------------------------------------------------------------------------
+def nutritionix_search(query: str) -> Optional[FoodResult]:
+    """Search Nutritionix branded + restaurant database. Returns None if keys not set."""
+    if not NUTRITIONIX_APP_ID or not NUTRITIONIX_API_KEY:
+        return None
+    nx_headers = {
+        **HEADERS,
+        "x-app-id":  NUTRITIONIX_APP_ID,
+        "x-app-key": NUTRITIONIX_API_KEY,
+    }
+    # Step 1: find the best branded item via instant search
+    try:
+        r = requests.get(
+            "https://trackapi.nutritionix.com/v2/search/instant",
+            params={"query": query, "branded": True, "self": False, "detailed": False},
+            headers=nx_headers,
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        branded = r.json().get("branded", [])
+        if not branded:
+            return None
+        item = branded[0]
+        nix_item_id = item.get("nix_item_id")
+        if not nix_item_id:
+            return None
+    except Exception:
+        return None
+
+    # Step 2: fetch full nutrient detail for that item
+    try:
+        r2 = requests.get(
+            "https://trackapi.nutritionix.com/v2/search/item",
+            params={"nix_item_id": nix_item_id},
+            headers=nx_headers,
+            timeout=TIMEOUT,
+        )
+        r2.raise_for_status()
+        foods = r2.json().get("foods", [])
+        if not foods:
+            return None
+        f = foods[0]
+        return FoodResult(
+            name=f.get("food_name", query),
+            source="nutritionix",
+            basis="per_serving",
+            calories=_f(f.get("nf_calories")),
+            protein_g=_f(f.get("nf_protein")),
+            fat_g=_f(f.get("nf_total_fat")),
+            saturated_fat_g=_f(f.get("nf_saturated_fat")),
+            carbs_g=_f(f.get("nf_total_carbohydrate")),
+            sugar_g=_f(f.get("nf_sugars")),
+            fiber_g=_f(f.get("nf_dietary_fiber")),
+            sodium_mg=_f(f.get("nf_sodium")),
+            serving_g=_f(f.get("serving_weight_grams")),
+            raw=f,
+        )
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
 # Router
 # --------------------------------------------------------------------------
 _BARCODE_RE = re.compile(r"^\d{8,14}$")
@@ -238,6 +301,10 @@ def lookup(query: str, kind: str = "auto") -> Optional[FoodResult]:
         except Exception:
             return usda_search(query)
     if kind == "name":
+        # Try Nutritionix first (has chain restaurant menus); fall back to USDA
+        nx = nutritionix_search(query)
+        if nx is not None:
+            return nx
         return usda_search(query)
     raise ValueError(f"unknown kind: {kind}")
 
