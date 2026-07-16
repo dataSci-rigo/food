@@ -79,15 +79,14 @@ def _format_catalog(category: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _parse_add_med(text: str) -> tuple[str, float | None, str | None, str]:
-    """Parse '/add_med name dose unit [category]' or '/add_med name'."""
+def _parse_add_med(text: str) -> tuple[str, float | None, str | None]:
+    """Parse 'name [dose unit]' from the args portion of /add_med or /add_supp."""
     parts = text.strip().split()
     if not parts:
-        return "", None, None, "supplement"
+        return "", None, None
     name = parts[0]
     dose_amount = None
     dose_unit   = None
-    category    = "supplement"
     if len(parts) >= 2:
         try:
             dose_amount = float(parts[1])
@@ -95,9 +94,7 @@ def _parse_add_med(text: str) -> tuple[str, float | None, str | None, str]:
             pass
     if len(parts) >= 3:
         dose_unit = parts[2]
-    if len(parts) >= 4:
-        category = parts[3].lower()
-    return name, dose_amount, dose_unit, category
+    return name, dose_amount, dose_unit
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +167,7 @@ async def cmd_add_med(msg: Message):
     if not args:
         await msg.reply("Usage: /add_med name [dose] [unit]\nExample: /add_med Metformin 500 mg")
         return
-    name, dose_amount, dose_unit, _ = _parse_add_med(args)
+    name, dose_amount, dose_unit = _parse_add_med(args)
     if not name:
         await msg.reply("Please provide a medication name.")
         return
@@ -213,7 +210,7 @@ async def cmd_add_supp(msg: Message):
     if not args:
         await msg.reply('Usage: /add_supp name [dose] [unit]\nExample: /add_supp "Vitamin D" 2000 IU')
         return
-    name, dose_amount, dose_unit, _ = _parse_add_med(args)
+    name, dose_amount, dose_unit = _parse_add_med(args)
     if not name:
         await msg.reply("Please provide a supplement name.")
         return
