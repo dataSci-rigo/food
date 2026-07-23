@@ -3,3 +3,9 @@ flask>=3.0.0
 anthropic>=0.50.0
 python-dotenv>=1.0.0
 requests>=2.31.0
+
+# fridge_handlers.py imports fridge_recipes' core/ modules directly (inventory,
+# rank, search, nutrition) -- editable install of the sibling repo, both
+# deployed under ~/apps/<project>/ on the VM. See fridge_recipes/pyproject.toml
+# for its own dependency list (pulled in transitively by this).
+-e ../fridge_recipes

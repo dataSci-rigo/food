@@ -6,7 +6,7 @@ Routes:
     /food          Nutrition log (editable — edit grams/name, delete, add)
     /workout       Workout log (delete)
     /meds          Medication catalog + today's doses
-    /mealprep      Fridge inventory + recent activity
+    /mealprep      Fridge inventory (fridge_recipes/data/app.db)
 
 Start: python web.py  (or via systemd alongside hub.py)
 """
@@ -21,9 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 import db
 import meds_db
-import mealprep_db
 import workout_db
 from flask import Flask, abort, redirect, render_template_string, request, url_for
+
+from core import inventory as fridge_inventory
+from core.config import APP_DB_PATH as FRIDGE_APP_DB_PATH
 
 app = Flask(__name__)
 
@@ -168,7 +170,7 @@ def hub():
     cal = int(db.get_day_totals(today).get("calories", 0))
     n_workouts = len(workout_db.get_day_log(today))
     n_doses    = len(meds_db.get_today_doses())
-    n_fridge   = len(mealprep_db.get_fridge())
+    n_fridge   = len(fridge_inventory.list_inventory(db_path=FRIDGE_APP_DB_PATH))
     return render_template_string("""\
 <!doctype html><html><head>{{ style|safe }}<title>Wellness Hub</title></head><body>
 <h1>🍱 Wellness Hub</h1>
@@ -282,6 +284,10 @@ def food():
                  value="{{ "%.0f"|format(row.calories) if row.calories else '' }}"
                  placeholder="—">
         </div>
+        <div class="field">
+          <span>Move to date</span>
+          <input type="date" name="new_date" value="{{ row.date }}" style="width:140px">
+        </div>
         <div style="display:flex;gap:6px;align-self:flex-end">
           <button type="submit" class="btn btn-save">Save</button>
           <button type="button" class="btn"
@@ -292,6 +298,7 @@ def food():
       <p style="font-size:.75em;color:var(--muted);margin-top:6px">
         Changing grams rescales all nutrients proportionally.
         Edit kcal directly to override without rescaling.
+        Change the date to move this entry to a different day.
       </p>
     </td>
   </tr>
@@ -441,6 +448,12 @@ def food_edit(entry_id: int):
         }
 
     db.update_log_entry(entry_id, food_name, new_grams if new_grams else old_grams, nutrients)
+
+    new_date = (request.form.get("new_date") or "").strip()
+    if new_date and new_date != date:
+        db.update_log_date(entry_id, new_date)
+        return redirect(url_for("food", date=new_date))
+
     return redirect(url_for("food", date=date))
 
 
@@ -731,8 +744,11 @@ def meds_remove(name: str):
 
 @app.route("/mealprep")
 def mealprep():
-    items = mealprep_db.get_fridge()
-    log   = mealprep_db.get_fridge_log(20)
+    # Fridge inventory now lives in fridge_recipes/data/app.db (core.inventory)
+    # -- mealprep_db.py is retired. No activity-log equivalent exists yet in
+    # the new schema (fridge_recipes has no audit-log table), so that section
+    # is gone; state/expiry replace it as the at-a-glance freshness signal.
+    items = fridge_inventory.list_inventory(db_path=FRIDGE_APP_DB_PATH)
     return render_template_string("""\
 <!doctype html><html><head>{{ style|safe }}<title>Fridge</title></head><body>
 <a class="back" href="/">← Hub</a>
@@ -740,15 +756,22 @@ def mealprep():
 
 {% if items %}
 <table>
-  <thead><tr><th>Item</th><th style="text-align:right">Qty</th>
-  <th>Unit</th><th>Updated</th></tr></thead>
+  <thead><tr><th>Item</th><th>Qty</th><th>Location</th>
+  <th>State</th><th>Expires</th></tr></thead>
   <tbody>
   {% for item in items %}
   <tr>
-    <td>{{ item.item_name }}</td>
-    <td style="text-align:right;font-weight:500">{{ "%.0f"|format(item.quantity) }}</td>
-    <td style="color:var(--muted)">{{ item.unit }}</td>
-    <td style="color:var(--muted);font-size:.85em">{{ item.updated_at[5:16] }}</td>
+    <td>{{ item.canonical_ingredient }}</td>
+    <td style="color:var(--muted)">{{ item.qty_text or "—" }}</td>
+    <td style="color:var(--muted)">{{ item.location }}</td>
+    <td>
+      {% if item.state in ('use_soon', 'expired') %}
+        <span style="color:var(--danger)">{{ item.state }}</span>
+      {% else %}
+        <span style="color:var(--accent)">{{ item.state }}</span>
+      {% endif %}
+    </td>
+    <td style="color:var(--muted);font-size:.85em">{{ item.expires_at[:10] if item.expires_at else "—" }}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -756,33 +779,8 @@ def mealprep():
 {% else %}
 <p class="empty">🧊 Fridge is empty.</p>
 {% endif %}
-
-<h2>Recent Activity</h2>
-{% if log %}
-<table>
-  <thead><tr><th>Time</th><th>Action</th><th>Item</th><th style="text-align:right">Qty</th></tr></thead>
-  <tbody>
-  {% for entry in log %}
-  <tr>
-    <td style="color:var(--muted);white-space:nowrap">{{ entry.logged_at[5:16] }}</td>
-    <td>
-      {% if entry.action == 'add' %}<span style="color:var(--accent)">+ add</span>
-      {% elif entry.action == 'eat' %}<span style="color:var(--warn)">🍽 eat</span>
-      {% else %}<span style="color:var(--danger)">- remove</span>{% endif %}
-    </td>
-    <td>{{ entry.item_name }}</td>
-    <td style="text-align:right;color:var(--muted)">
-      {{ "%.0f %s"|format(entry.quantity, entry.unit) if entry.quantity else "—" }}
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="empty">No activity yet.</p>
-{% endif %}
 </body></html>""",
-        style=_STYLE, items=items, log=log,
+        style=_STYLE, items=items,
     )
 
 
@@ -791,8 +789,10 @@ def mealprep():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from core.db import init_all as init_fridge_db
+
     db.init_db()
     meds_db.init_db()
     workout_db.init_db()
-    mealprep_db.init_db()
+    init_fridge_db()
     app.run(host="0.0.0.0", port=9000, debug=False)

@@ -29,7 +29,8 @@ COOKING_MD     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "COOKI
 CHANNEL_ID       = -1003592611679
 THREAD_NUTRITION = 2
 THREAD_WORKOUT   = 3
-THREAD_MEALPREP  = 4
+THREAD_MEALPREP  = 4  # retired -- mealprep_handlers.py is unregistered, kept for rollback
+THREAD_FRIDGE    = 4  # fridge_handlers.py takes over the same topic in place
 THREAD_MEDS      = 5
 
 DAILY_LIMITS = {

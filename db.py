@@ -194,6 +194,15 @@ def mark_cheat(log_id: int) -> None:
         con.execute("UPDATE food_log SET cheat=1 WHERE id=?", (log_id,))
 
 
+def update_log_date(log_id: int, new_date: str) -> bool:
+    """Move a food_log entry to a different date. Returns True if found."""
+    with _conn() as con:
+        cur = con.execute(
+            "UPDATE food_log SET date=? WHERE id=?", (new_date, log_id)
+        )
+    return cur.rowcount > 0
+
+
 def get_cheat_history(days: int = 7) -> list[dict]:
     from datetime import timedelta
     from zoneinfo import ZoneInfo
