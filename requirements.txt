@@ -8,4 +8,4 @@ requests>=2.31.0
 # rank, search, nutrition) -- editable install of the sibling repo, both
 # deployed under ~/apps/<project>/ on the VM. See fridge_recipes/pyproject.toml
 # for its own dependency list (pulled in transitively by this).
--e ../fridge_recipes
+-e ../fridge-recipes
