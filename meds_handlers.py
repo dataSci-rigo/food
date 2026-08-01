@@ -5,9 +5,12 @@ Catalog shown as an inline keyboard; tap to log dose.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import re
 from datetime import datetime
+from io import BytesIO
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -20,6 +23,9 @@ from aiogram.types import (
 
 import config
 import meds_db
+
+# Temp store for photo-parsed results: message_id -> {name, dose_amount, dose_unit}
+_photo_pending: dict[int, dict] = {}
 
 log = logging.getLogger(__name__)
 
@@ -238,11 +244,109 @@ async def cmd_remove_med(msg: Message):
         await msg.reply(f"*{name}* not found in catalog.", parse_mode="Markdown")
 
 
+@router.message(_CHAN, _THR, F.photo)
+async def handle_supp_photo(msg: Message):
+    import anthropic
+    wait = await msg.reply("🔍 Reading label...")
+    try:
+        buf = BytesIO()
+        await msg.bot.download(msg.photo[-1], destination=buf)
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_KEY)
+        resp = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "This is a supplement or medication label. "
+                            "Extract: product name (short, e.g. 'Vitamin D3'), "
+                            "dose amount (number), dose unit (e.g. mg, IU, mcg, g, capsule). "
+                            'Reply with JSON only: {"name": ..., "dose_amount": ..., "dose_unit": ...}. '
+                            "If dose is unclear use null for dose_amount and dose_unit."
+                        ),
+                    },
+                ],
+            }],
+        )
+        raw = resp.content[0].text.strip()
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        data = json.loads(m.group()) if m else {}
+        name = (data.get("name") or "").strip()
+        dose_amount = data.get("dose_amount")
+        dose_unit = (data.get("dose_unit") or "").strip() or None
+
+        if not name:
+            await wait.edit_text("❌ Couldn't read a product name. Try a clearer photo.")
+            return
+
+        if dose_amount is not None:
+            try:
+                dose_amount = float(dose_amount)
+            except (TypeError, ValueError):
+                dose_amount = None
+
+        _photo_pending[wait.message_id] = {"name": name, "dose_amount": dose_amount, "dose_unit": dose_unit}
+        dose_str = f" {dose_amount:.4g} {dose_unit}" if dose_amount and dose_unit else ""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🌿 Supplement", callback_data=f"med:padd:supp:{wait.message_id}"),
+                InlineKeyboardButton(text="💊 Medication", callback_data=f"med:padd:med:{wait.message_id}"),
+            ],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data=f"med:padd:cancel:{wait.message_id}")],
+        ])
+        await wait.edit_text(
+            f"Found: *{name}*{dose_str}\n\nAdd to catalog as:",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        log.exception("supp photo error")
+        await wait.edit_text("❌ Failed to read label. Try again.")
+
+
+@router.callback_query(F.data.startswith("med:padd:"))
+async def handle_photo_confirm(cb: CallbackQuery):
+    parts = cb.data.split(":", 3)  # med:padd:supp:12345 or med:padd:cancel:12345
+    action = parts[2]
+    msg_id = int(parts[3]) if len(parts) > 3 else 0
+
+    if action == "cancel":
+        _photo_pending.pop(msg_id, None)
+        await cb.message.edit_text("Cancelled.")
+        await cb.answer()
+        return
+
+    data = _photo_pending.pop(msg_id, None)
+    if not data:
+        await cb.answer("Session expired — send the photo again.", show_alert=True)
+        return
+
+    category = "supplement" if action == "supp" else "medication"
+    name, dose_amount, dose_unit = data["name"], data["dose_amount"], data["dose_unit"]
+    meds_db.add_med(name, dose_amount, dose_unit, category=category)
+    dose_str = f" {dose_amount:.4g} {dose_unit}" if dose_amount and dose_unit else ""
+    emoji = "🌿" if category == "supplement" else "💊"
+    await cb.message.edit_text(
+        f"✅ Added {emoji} *{name}*{dose_str} to {category}s.",
+        parse_mode="Markdown",
+    )
+    await cb.answer()
+
+
 @router.message(_CHAN, _THR, F.text & ~F.text.startswith("/"))
 async def handle_text(msg: Message):
     await msg.reply(
         "Use /meds to see your catalog and tap to log a dose.\n"
-        "Or /add_med to add a new medication/supplement."
+        "Or /add_med / /add_supp to add manually, or send a photo of the label."
     )
 
 

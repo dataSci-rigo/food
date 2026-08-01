@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import config
 import db as nutrition_db
@@ -39,7 +39,8 @@ from core import inventory as fridge_inventory
 from core.models import InventoryItem, RankFilters
 from core.nutrition import lookup as ingredient_nutrition_lookup
 from core.rank import rank_recipes
-from core.search import get_recipe, load_candidate_recipes
+from core.recommend import recommend as recommend_similar
+from core.search import find_by_title, get_recipe, load_candidate_recipes
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ _INTENT_SYSTEM = """\
 You are a fridge / recipe tracker. Extract intent and items from the user's message.
 Return ONLY valid JSON:
 {
-  "intent": "add" | "eat" | "remove" | "show" | "cook" | "other",
+  "intent": "add" | "eat" | "remove" | "show" | "cook" | "find" | "other",
   "items": [
     {"name": "chicken breast", "quantity": 500, "unit": "g"}
   ]
@@ -65,7 +66,12 @@ Return ONLY valid JSON:
 - "eat"   : user consumed something from the fridge (reduce fridge AND log to nutrition)
 - "remove": user discarded food without eating (spoiled, gave away)
 - "show"  : user wants to see fridge contents
-- "cook"  : user is asking what they can make / wants recipe suggestions
+- "cook"  : user is asking what they can make from their CURRENT fridge contents in
+            general (e.g. "what can I make?", "any ideas for dinner?") -- no specific
+            dish named
+- "find"  : user names a SPECIFIC dish and wants its recipe/ingredients (e.g. "what do
+            I need to make hummus?", "how do I make lasagna?", "find me a chili recipe")
+            -- put the dish name in items[0].name, quantity/unit not needed
 - "other" : unrelated
 For "eat" without explicit quantity, use a reasonable serving size and note it.
 Use "g" for solids, "ml" for liquids, "count" for items (eggs, apples, etc.).
@@ -216,11 +222,14 @@ Tell me what you bought or ate in plain text:
   "I ate the chicken" — deducts from fridge + logs to nutrition
   "Threw out the leftover rice" — remove without nutrition log
   "What can I make?" — recipe suggestions from your fridge
+  "What do I need to make hummus?" — look up a specific dish
 
 /fridge — show fridge contents
 /cook — top recipe suggestions from what's in your fridge
+/find <name> — search for a recipe by name (menu if more than one match)
 /recipe <id> — full recipe detail (ingredients you have/miss, directions)
 /save <id> [stars] — bookmark a recipe you liked (default 5★)
+/recommend — recipes similar to the ones you've saved
 
 When you eat something, I'll auto-log it to your nutrition topic too.
 """
@@ -261,17 +270,12 @@ async def cmd_cook(msg: Message):
     await msg.reply(reply, parse_mode="Markdown")
 
 
-@router.message(_CHAN, _THR, Command("recipe"))
-async def cmd_recipe(msg: Message):
-    parts = (msg.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        await msg.reply("Usage: /recipe <id> (get an id from /cook)")
-        return
-    recipe_id = int(parts[1].strip())
-    detail = await asyncio.get_event_loop().run_in_executor(None, get_recipe, recipe_id)
+def _recipe_detail_text(recipe_id: int) -> str | None:
+    """Shared renderer for /recipe <id>, the "find" intent's single-match
+    case, and the pick-one menu's callback handler -- one format everywhere."""
+    detail = get_recipe(recipe_id)
     if detail is None:
-        await msg.reply(f"No recipe #{recipe_id}.")
-        return
+        return None
     have_names = {
         i["canonical_ingredient"]
         for i in fridge_inventory.list_inventory(db_path=APP_DB_PATH)
@@ -283,7 +287,66 @@ async def cmd_recipe(msg: Message):
         lines.append(f"  {mark} {ing['name']}{qty}")
     if detail["directions"]:
         lines.append(f"\n{detail['directions']}")
-    await msg.reply("\n".join(lines), parse_mode="Markdown")
+    return "\n".join(lines)
+
+
+@router.message(_CHAN, _THR, Command("recipe"))
+async def cmd_recipe(msg: Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await msg.reply("Usage: /recipe <id> (get an id from /cook or /find)")
+        return
+    recipe_id = int(parts[1].strip())
+    text = await asyncio.get_event_loop().run_in_executor(None, _recipe_detail_text, recipe_id)
+    if text is None:
+        await msg.reply(f"No recipe #{recipe_id}.")
+        return
+    await msg.reply(text, parse_mode="Markdown")
+
+
+def _matches_keyboard(matches: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=m["title"], callback_data=f"recipe:{m['id']}")]
+        for m in matches
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _reply_find_results(msg: Message, query: str) -> None:
+    matches = await asyncio.get_event_loop().run_in_executor(None, find_by_title, query)
+    if not matches:
+        await msg.reply(f"No recipe found for \"{query}\". Try a different search.")
+        return
+    if len(matches) == 1:
+        text = await asyncio.get_event_loop().run_in_executor(
+            None, _recipe_detail_text, matches[0]["id"]
+        )
+        await msg.reply(text, parse_mode="Markdown")
+        return
+    await msg.reply(
+        f"Found {len(matches)} recipes for \"{query}\" — pick one:",
+        reply_markup=_matches_keyboard(matches),
+    )
+
+
+@router.message(_CHAN, _THR, Command("find"))
+async def cmd_find(msg: Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await msg.reply("Usage: /find <recipe name>, e.g. /find hummus")
+        return
+    await _reply_find_results(msg, parts[1].strip())
+
+
+@router.callback_query(F.message.chat.id == config.CHANNEL_ID, F.data.startswith("recipe:"))
+async def on_recipe_picked(callback: CallbackQuery):
+    recipe_id = int(callback.data.split(":", 1)[1])
+    text = await asyncio.get_event_loop().run_in_executor(None, _recipe_detail_text, recipe_id)
+    await callback.answer()
+    if text is None:
+        await callback.message.reply(f"No recipe #{recipe_id}.")
+        return
+    await callback.message.reply(text, parse_mode="Markdown")
 
 
 @router.message(_CHAN, _THR, Command("save"))
@@ -297,6 +360,40 @@ async def cmd_save(msg: Message):
     stars = max(1, min(5, stars))
     await asyncio.get_event_loop().run_in_executor(None, _rate_recipe, recipe_id, stars)
     await msg.reply(f"Saved #{recipe_id} at {stars}★.")
+
+
+def _liked_recipe_ids() -> list[int]:
+    conn = fridge_connect(APP_DB_PATH)
+    try:
+        rows = conn.execute("SELECT DISTINCT recipe_id FROM ratings").fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def _recommend_reply(top_n: int = 5) -> str:
+    liked_ids = _liked_recipe_ids()
+    if not liked_ids:
+        return "Save a few recipes with /save <id> first, then I can recommend similar ones."
+    liked_titles = [get_recipe(rid) for rid in liked_ids[:3]]
+    liked_titles = [d["title"] for d in liked_titles if d]
+
+    results = recommend_similar(liked_ids, top_n=top_n)
+    if not results:
+        return "Couldn't find anything similar to your saved recipes yet."
+
+    because = ", ".join(liked_titles) + ("…" if len(liked_ids) > 3 else "")
+    lines = [f"🍽 *Because you liked {because}:*"]
+    for r in results:
+        lines.append(f"\n*#{r.recipe_id}* {r.title}  ({r.similarity:.0%} similar)")
+    lines.append("\nTap /recipe <id> for the full recipe.")
+    return "\n".join(lines)
+
+
+@router.message(_CHAN, _THR, Command("recommend"))
+async def cmd_recommend(msg: Message):
+    reply = await asyncio.get_event_loop().run_in_executor(None, _recommend_reply)
+    await msg.reply(reply, parse_mode="Markdown")
 
 
 @router.message(_CHAN, _THR, F.text & ~F.text.startswith("/"))
@@ -318,6 +415,11 @@ async def handle_text(msg: Message):
     if intent == "cook":
         reply = await asyncio.get_event_loop().run_in_executor(None, _cook_reply)
         await msg.reply(reply, parse_mode="Markdown")
+        return
+
+    if intent == "find":
+        dish = items[0]["name"] if items else msg.text
+        await _reply_find_results(msg, dish)
         return
 
     if intent == "add":
