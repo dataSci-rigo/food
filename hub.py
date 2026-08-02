@@ -64,6 +64,8 @@ async def main():
         BotCommand(command="find",          description="Search for a recipe by name"),
         BotCommand(command="recipe",        description="Full recipe detail: /recipe <id>"),
         BotCommand(command="recommend",     description="Recipes similar to what you've saved"),
+        BotCommand(command="sub",           description="Substitutes for an ingredient"),
+        BotCommand(command="deleterecipe",  description="Delete an ingested recipe: /deleterecipe c<id>"),
         BotCommand(command="workout_today", description="Today's workout log"),
         BotCommand(command="meds",          description="Medication catalog (tap to log)"),
         BotCommand(command="med_log",       description="Today's medication doses"),
