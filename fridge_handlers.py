@@ -595,7 +595,11 @@ def _save_ingested_recipe(extracted: dict, user_input: str | None) -> tuple[int,
         canonical = canonicalize(line.get("canonical_guess") or line.get("raw_text", ""))
         if not canonical:
             continue
-        ingredients.append({"canonical_name": canonical, "quantity_text": line.get("quantity_text")})
+        ingredients.append({
+            "canonical_name": canonical,
+            "quantity_text": line.get("quantity_text"),
+            "raw_text": line.get("raw_text"),  # kept for etl/promote_custom_recipes.py's re-parse
+        })
         alts = [canonicalize(a) for a in line.get("alternatives") or [] if a]
         if alts:
             alternatives[canonical] = alts
