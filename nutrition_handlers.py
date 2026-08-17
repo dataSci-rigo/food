@@ -43,6 +43,23 @@ def _today() -> str:
     return datetime.now(config.TZ).strftime("%Y-%m-%d")
 
 
+def _parse_date_prefix(text: str) -> tuple[str, str]:
+    """Strip leading date keyword from text. Returns (date_str, remaining_text).
+    Recognizes: 'yesterday', 'YYYY-MM-DD'. Anything else returns today."""
+    from datetime import timedelta
+    parts = text.strip().split(None, 1)
+    if not parts:
+        return _today(), ""
+    first = parts[0].lower()
+    rest = parts[1] if len(parts) > 1 else ""
+    if first == "yesterday":
+        d = (datetime.now(config.TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+        return d, rest
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', first):
+        return first, rest
+    return _today(), text
+
+
 def _progress_bar(actual: float, limit: float, width: int = 10) -> str:
     pct    = min(actual / limit, 1.0) if limit else 0
     filled = round(pct * width)
@@ -521,7 +538,11 @@ async def cmd_log(msg: Message):
     food_text = (msg.text or "").split(maxsplit=1)
     food_text = food_text[1].strip() if len(food_text) > 1 else ""
     if not food_text:
-        await msg.reply("Usage: /log 2 eggs and toast")
+        await msg.reply("Usage: /log 2 eggs and toast\n       /log yesterday 2 eggs and toast")
+        return
+    date, food_text = _parse_date_prefix(food_text)
+    if not food_text:
+        await msg.reply("Please include a food after the date.")
         return
     try:
         intent_data = await _extract_intent(food_text)
@@ -529,7 +550,7 @@ async def cmd_log(msg: Message):
         await msg.reply(f"Couldn't parse: {e}")
         return
     foods = intent_data.get("foods") or [food_text]
-    await _handle_log(msg, foods, food_text)
+    await _handle_log(msg, foods, food_text, date=date)
 
 
 @router.message(_CHAN, _THR, Command("compare"))
@@ -712,8 +733,11 @@ async def handle_text(msg: Message):
         # User typed a new message instead of tapping a button — clear old state
         db.clear_state(msg.chat.id)
 
+    log_date, clean_text = _parse_date_prefix(msg.text)
+    parse_text = clean_text if log_date != _today() else msg.text
+
     try:
-        intent_data = await _extract_intent(msg.text)
+        intent_data = await _extract_intent(parse_text)
     except Exception as e:
         log.exception("Intent extraction failed")
         await msg.reply(f"Couldn't understand that: {e}")
@@ -724,7 +748,7 @@ async def handle_text(msg: Message):
 
     if intent_data.get("clarification_needed"):
         q = intent_data.get("clarification_question", "Could you clarify?")
-        db.set_state(msg.chat.id, "clarifying", {"original": msg.text, "question": q})
+        db.set_state(msg.chat.id, "clarifying", {"original": parse_text, "question": q})
         await msg.reply(q)
         return
 
@@ -735,11 +759,11 @@ async def handle_text(msg: Message):
     elif intent == "check":
         await _handle_check(msg, foods)
     elif intent == "log":
-        foods_label = ", ".join(foods) if foods else msg.text
+        foods_label = ", ".join(foods) if foods else parse_text
         db.set_state(msg.chat.id, "awaiting_cmp_choice", {
-            "user_input": msg.text,
+            "user_input": parse_text,
             "foods": foods,
-            "date": _today(),
+            "date": log_date,
         })
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📊 Lookup",       callback_data="cmp:lookup"),
@@ -787,10 +811,10 @@ async def _handle_check(msg: Message, foods: list[str]):
     await msg.reply("\n".join(lines), parse_mode="Markdown")
 
 
-async def _handle_log(msg: Message, foods: list[str], user_input: str, reply_fn=None):
+async def _handle_log(msg: Message, foods: list[str], user_input: str, reply_fn=None, date: str | None = None):
     if reply_fn is None:
         reply_fn = msg.reply
-    date         = _today()
+    date         = date or _today()
     reply_lines  = ["Logged:"]
     log_ids: list[int]  = []
     pending_foods: list[dict] = []

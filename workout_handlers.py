@@ -70,6 +70,22 @@ def _today() -> str:
     return datetime.now(config.TZ).strftime("%Y-%m-%d")
 
 
+def _parse_date_prefix(text: str) -> tuple[str, str]:
+    """Strip leading date keyword. Returns (date_str, remaining_text)."""
+    from datetime import timedelta
+    parts = text.strip().split(None, 1)
+    if not parts:
+        return _today(), ""
+    first = parts[0].lower()
+    rest = parts[1] if len(parts) > 1 else ""
+    if first == "yesterday":
+        d = (datetime.now(config.TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+        return d, rest
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', first):
+        return first, rest
+    return _today(), text
+
+
 def _format_exercise(ex: dict) -> str:
     parts = [ex["exercise"]]
     if ex.get("sets") and ex.get("reps"):
@@ -147,8 +163,9 @@ async def cmd_history(msg: Message):
 
 @router.message(_CHAN, _THR, F.text & ~F.text.startswith("/"))
 async def handle_text(msg: Message):
+    date, parse_text = _parse_date_prefix(msg.text)
     try:
-        data = await _extract_workout(msg.text)
+        data = await _extract_workout(parse_text)
     except Exception as e:
         log.exception("Workout extraction failed")
         await msg.reply(f"Couldn't parse that: {e}")
@@ -159,7 +176,6 @@ async def handle_text(msg: Message):
         await msg.reply("Didn't catch any exercises. Try: \"3 sets of 10 push-ups\" or \"ran 5km\".")
         return
 
-    date  = _today()
     lines = ["Logged:"]
     for ex in exercises:
         workout_db.log_exercise(
