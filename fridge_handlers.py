@@ -39,7 +39,7 @@ import config
 import db as nutrition_db
 import gi as gi_mod
 from nutrition import lookup as nutrition_lookup
-from recipe_ingest import extract_from_image, extract_from_text
+from core.recipe_ingest import extract_from_image, extract_from_text, save_extracted
 
 from core.db import connect as fridge_connect
 from core.config import APP_DB_PATH, RECIPES_DB_PATH
@@ -50,6 +50,7 @@ from core.models import InventoryItem, RankFilters
 from core.normalize import canonicalize
 from core.nutrition import lookup as ingredient_nutrition_lookup
 from core.rank import rank_recipes
+from core.recipe_detail import get_recipe_detail, parse_ref as _parse_ref, display_id as _display_id
 from core.recommend import recommend as recommend_similar
 from core.search import get_recipe, load_candidate_recipes, search_recipes
 
@@ -122,19 +123,6 @@ async def _extract_intent(text: str) -> dict:
 # ---------------------------------------------------------------------------
 # Recipe id routing: "42" = corpus, "c42" = custom (unpromoted)
 # ---------------------------------------------------------------------------
-
-def _parse_ref(ref: str) -> tuple[str, int] | None:
-    ref = ref.strip()
-    if ref[:1].lower() == "c" and ref[1:].isdigit():
-        return ("custom", int(ref[1:]))
-    if ref.isdigit():
-        return ("corpus", int(ref))
-    return None
-
-
-def _display_id(source: str, recipe_id: int) -> str:
-    return f"c{recipe_id}" if source == "custom" else str(recipe_id)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -339,42 +327,27 @@ async def cmd_cook(msg: Message):
 
 
 def _recipe_detail_text(ref: str) -> str | None:
-    """Shared renderer for /recipe <id>, the "find" intent's single-match
+    """Markdown renderer for /recipe <id>, the "find" intent's single-match
     case, and the pick-one menu's callback handler -- one format everywhere.
-    `ref` is a display id: "42" (corpus) or "c42" (custom, unpromoted)."""
-    parsed = _parse_ref(ref)
-    if parsed is None:
-        return None
-    source, recipe_id = parsed
-
+    Have/missing assembly is shared with the web app via core.recipe_detail;
+    only the Markdown formatting lives here."""
     have_names = {
         i["canonical_ingredient"]
         for i in fridge_inventory.list_inventory(db_path=APP_DB_PATH)
     }
+    detail = get_recipe_detail(
+        ref, have_names, recipes_db_path=RECIPES_DB_PATH, app_db_path=APP_DB_PATH
+    )
+    if detail is None:
+        return None
 
-    if source == "corpus":
-        detail = get_recipe(recipe_id, db_path=RECIPES_DB_PATH)
-        if detail is None:
-            return None
-        title, directions = detail["title"], detail["directions"]
-        ingredient_rows = [(i["name"], i["quantity_text"]) for i in detail["ingredients"]]
-    else:
-        detail = custom_recipes_db.get_custom_recipe(recipe_id, db_path=APP_DB_PATH)
-        if detail is None:
-            return None
-        title, directions = detail["name"], detail["directions"]
-        ingredient_rows = [
-            (canonicalize(i["canonical_name"]), i.get("quantity_text"))
-            for i in detail["ingredients"]
-        ]
-
-    lines = [f"*{title}* (#{ref})\n"]
-    for name, qty_text in ingredient_rows:
-        mark = "✓" if name in have_names else "✗"
-        qty = f" ({qty_text})" if qty_text else ""
-        lines.append(f"  {mark} {name}{qty}")
-    if directions:
-        lines.append(f"\n{directions}")
+    lines = [f"*{detail['title']}* (#{detail['ref']})\n"]
+    for ing in detail["ingredients"]:
+        mark = "✓" if ing["have"] else "✗"
+        qty = f" ({ing['quantity_text']})" if ing["quantity_text"] else ""
+        lines.append(f"  {mark} {ing['name']}{qty}")
+    if detail["directions"]:
+        lines.append(f"\n{detail['directions']}")
     return "\n".join(lines)
 
 
@@ -589,29 +562,8 @@ async def cmd_sub(msg: Message):
 # ---------------------------------------------------------------------------
 
 def _save_ingested_recipe(extracted: dict, user_input: str | None) -> tuple[int, dict]:
-    ingredients = []
-    alternatives = {}
-    for line in extracted.get("ingredients", []):
-        canonical = canonicalize(line.get("canonical_guess") or line.get("raw_text", ""))
-        if not canonical:
-            continue
-        ingredients.append({
-            "canonical_name": canonical,
-            "quantity_text": line.get("quantity_text"),
-            "raw_text": line.get("raw_text"),  # kept for etl/promote_custom_recipes.py's re-parse
-        })
-        alts = [canonicalize(a) for a in line.get("alternatives") or [] if a]
-        if alts:
-            alternatives[canonical] = alts
-            for alt in alts:
-                substitutions_db.add_substitution(canonical, alt, source="ingested", db_path=APP_DB_PATH)
-
-    title = extracted.get("title") or "Untitled recipe"
-    recipe_id = custom_recipes_db.save_recipe(
-        title, ingredients, directions=extracted.get("directions"),
-        alternatives=alternatives, user_input=user_input, db_path=APP_DB_PATH,
-    )
-    return recipe_id, {"title": title, "ingredients": ingredients, "alternatives": alternatives}
+    # Shared with the web app's add-your-own page -- see core/recipe_ingest.py.
+    return save_extracted(extracted, user_input, db_path=APP_DB_PATH)
 
 
 def _ingest_summary(recipe_id: int, saved: dict) -> str:
